@@ -1,0 +1,162 @@
+<div class="bg-gray-800 rounded-xl shadow-lg border border-gray-700 overflow-hidden" x-show="activeTab === '{{ res.id }}'">
+    <!-- Result Header -->
+    <div class="px-6 py-4 bg-gray-900/50 border-b border-gray-700 flex justify-between items-center">
+        <div class="flex items-center gap-3">
+            <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+            <span class="font-mono text-sm font-semibold text-gray-300">{{ res.file }}</span>
+        </div>
+        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide {{ 'bg-green-900/30 text-green-400 border border-green-800' if res.status == 'RESOLVED' else 'bg-red-900/30 text-red-400 border border-red-800' }}">
+            {{ res.status }}
+        </span>
+    </div>
+    
+    <div class="p-6">
+        <!-- Summary Section -->
+        <div class="mb-6">
+            <div class="flex items-center gap-2 mb-2">
+                <h4 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Summary</h4>
+            </div>
+            <p class="text-gray-300 leading-relaxed text-lg">{{ res.ai_analysis.summary }}</p>
+        </div>
+
+        <!-- AI Thinking Process (Collapsible) -->
+        <div x-data="{ open: false }" class="mb-6 border border-gray-700 rounded-lg overflow-hidden">
+            <button @click="open = !open" class="w-full flex justify-between items-center px-4 py-3 bg-gray-800 hover:bg-gray-750 transition-colors text-left group">
+                <div class="flex items-center gap-2">
+                    <svg class="w-4 h-4 text-mongo-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path></svg>
+                    <span class="text-sm font-bold text-gray-300 group-hover:text-white transition-colors">AI Thinking Process</span>
+                </div>
+                <span class="text-xs text-gray-500 group-hover:text-gray-300 transition-colors" x-text="open ? 'Hide' : 'Show steps'"></span>
+            </button>
+            
+            <div x-show="open" x-collapse class="bg-gray-900/50 p-5 border-t border-gray-700">
+                <ul class="space-y-3">
+                    {% for step in res.ai_analysis.thinking_process %}
+                    <li class="flex gap-3 text-sm text-gray-400">
+                        <span class="font-mono font-bold text-mongo-green select-none">{{ loop.index }}.</span>
+                        <span>{{ step }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <!-- Original Code / Diff Context (Collapsible) -->
+        {% if res.code_snippet %}
+        <div x-data="{ open: false }" class="mb-6 border border-gray-700 rounded-lg overflow-hidden">
+            <button @click="open = !open" class="w-full flex justify-between items-center px-4 py-3 bg-gray-800 hover:bg-gray-750 transition-colors text-left group">
+                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider group-hover:text-gray-300 transition-colors">Discussion Subject (Diff)</h4>
+                <span class="text-xs text-gray-500 group-hover:text-gray-300 transition-colors" x-text="open ? 'Collapse' : 'Expand'"></span>
+            </button>
+            <div x-show="open" x-collapse>
+                <pre class="!m-0 !rounded-none !bg-gray-900"><code class="language-diff text-sm">{{ res.code_snippet }}</code></pre>
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- Expandable Deep Dive -->
+        <div x-data="{ expanded: false }" class="mb-8 border border-gray-700 rounded-lg overflow-hidden">
+            <button @click="expanded = !expanded" class="w-full px-6 py-3 bg-gray-800 hover:bg-gray-750 transition-colors">
+                <div class="flex justify-between items-center">
+                    <span class="text-sm font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                        Technical Deep Dive
+                    </span>
+                    <svg class="w-5 h-5 text-gray-500 transform transition-transform duration-200" :class="{'rotate-180': expanded}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+            </button>
+            
+            <div x-show="expanded" x-collapse class="p-6 bg-gray-900/30 border-t border-gray-700 space-y-6">
+                
+                <!-- Code Analysis -->
+                <div>
+                    <h4 class="text-xs font-bold text-mongo-green uppercase tracking-wider mb-2">Code Analysis</h4>
+                    <p class="text-sm text-gray-300 whitespace-pre-line leading-relaxed">{{ res.ai_analysis.code_analysis }}</p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- Debate Analysis -->
+                    <div>
+                        <h4 class="text-xs font-bold text-mongo-green uppercase tracking-wider mb-2">Debate Evaluation</h4>
+                        <p class="text-sm text-gray-300 whitespace-pre-line leading-relaxed">{{ res.ai_analysis.debate_analysis }}</p>
+                    </div>
+                    <!-- Resolution Critique -->
+                    <div>
+                        <h4 class="text-xs font-bold text-mongo-green uppercase tracking-wider mb-2">Resolution Critique</h4>
+                        <p class="text-sm text-gray-300 whitespace-pre-line leading-relaxed">{{ res.ai_analysis.resolution_critique }}</p>
+                    </div>
+                </div>
+
+                <!-- Alternative Approaches -->
+                <div>
+                    <h4 class="text-xs font-bold text-mongo-green uppercase tracking-wider mb-2">Alternative Approaches</h4>
+                    <ul class="list-disc list-inside text-sm text-gray-300 space-y-1">
+                        {% for alt in res.ai_analysis.alternative_approaches %}
+                        <li>{{ alt }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+
+                <!-- Context Sources -->
+                {% if res.rag_sources %}
+                <div class="pt-4 border-t border-gray-700">
+                    <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Codebase Context Sources</h4>
+                    <div class="space-y-4">
+                        {% for source in res.rag_sources %}
+                        <div x-data="{ open: false }" class="border border-gray-700 rounded-lg overflow-hidden">
+                            <button @click="open = !open" class="w-full flex justify-between items-center px-4 py-2 bg-gray-800 hover:bg-gray-750 transition-colors text-left">
+                                <span class="text-xs font-mono font-medium text-mongo-green truncate max-w-md">
+                                    {{ source.file_path }} <span class="text-gray-500">(L{{ source.line_start }}-{{ source.line_end }})</span>
+                                </span>
+                                <span class="text-xs text-indigo-400 font-bold" x-text="open ? 'Collapse' : 'View Code'">View Code</span>
+                            </button>
+                            <div x-show="open" x-collapse>
+                                <pre class="!m-0 !rounded-none !bg-gray-900"><code class="language-python text-xs">{{ source.content }}</code></pre>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        
+        {% if res.status == 'UNRESOLVED' %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <div class="bg-red-900/20 p-4 rounded-lg border border-red-900/50">
+                <h4 class="text-xs font-bold text-red-400 uppercase tracking-wider mb-1">Severity</h4>
+                <p class="text-red-300 font-medium">{{ res.ai_analysis.severity }}</p>
+            </div>
+        </div>
+        {% endif %}
+        
+        <div class="mb-6">
+            <h4 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Reasoning</h4>
+            <p class="text-gray-300 leading-relaxed">{{ res.ai_analysis.reasoning }}</p>
+        </div>
+        
+        {% if res.ai_analysis.proposed_fix %}
+        <div class="mt-8 border border-gray-700 rounded-xl overflow-hidden">
+            <div class="bg-gray-800 px-5 py-3 border-b border-gray-700 flex justify-between items-center">
+                <h4 class="text-xs font-bold text-mongo-green uppercase tracking-wider flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                    Proposed Fix
+                </h4>
+                {% if res.ai_analysis.fix_relevance %}
+                <div class="text-xs text-gray-400 italic flex items-center gap-1 max-w-md truncate" title="{{ res.ai_analysis.fix_relevance }}">
+                    <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
+                    "{{ res.ai_analysis.fix_relevance }}"
+                </div>
+                {% endif %}
+            </div>
+            <div class="relative group">
+                <pre class="!m-0 !rounded-none !bg-gray-900 !p-5"><code class="language-python text-sm">{{ res.ai_analysis.proposed_fix }}</code></pre>
+                <button onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText)" class="absolute top-3 right-3 bg-gray-700 hover:bg-gray-600 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                    Copy
+                </button>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+

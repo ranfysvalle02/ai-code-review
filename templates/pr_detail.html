@@ -1,0 +1,332 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <div class="flex justify-between items-center mb-8 border-b border-gray-700 pb-4">
+        <div>
+            <h2 class="text-2xl font-bold text-white">PR #{{ pr_number }} Analysis</h2>
+            <p class="text-sm text-gray-400 mt-1">{{ owner }}/{{ repo }}</p>
+        </div>
+        <a href="/" class="inline-flex items-center px-4 py-2 border border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-300 bg-gray-800 hover:bg-gray-700 hover:text-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-mongo-green transition-colors">
+            &larr; New Search
+        </a>
+    </div>
+
+    <form action="/analyze" method="post" id="analyzeForm" x-data="{ 
+        allSelected: true, 
+        toggleAll() { 
+            this.allSelected = !this.allSelected; 
+            document.querySelectorAll('.thread-checkbox').forEach(el => el.checked = this.allSelected);
+        }
+    }">
+        <input type="hidden" name="owner" value="{{ owner }}">
+        <input type="hidden" name="repo" value="{{ repo }}">
+        <input type="hidden" name="pr_number" value="{{ pr_number }}">
+        <!-- Unique Client ID for Progress Tracking -->
+        <input type="hidden" name="client_id" id="clientId">
+
+        <div class="mb-8">
+            <div class="flex justify-between items-end mb-4">
+                <h3 class="text-lg font-semibold text-white">Select Threads to Analyze</h3>
+                <button type="button" @click="toggleAll()" class="text-sm font-medium text-mongo-green hover:text-green-400 transition-colors focus:outline-none">
+                    <span x-text="allSelected ? 'Deselect All' : 'Select All'"></span>
+                </button>
+            </div>
+            
+            <div class="space-y-3 max-h-[500px] overflow-y-auto border border-gray-700 p-4 rounded-xl bg-gray-900/50 shadow-inner custom-scrollbar">
+                {% if not threads %}
+                    <div class="text-center py-8 text-gray-500 italic">No conversation threads found on this PR.</div>
+                {% endif %}
+                
+                {% for thread in threads %}
+                <label class="block cursor-pointer group">
+                    <div class="bg-gray-800 p-4 rounded-lg shadow-sm border border-gray-700 group-hover:border-mongo-green/50 group-hover:shadow-md transition-all duration-200 flex items-start gap-4">
+                        <input type="checkbox" name="selected_threads" value="{{ thread.id }}" class="thread-checkbox mt-1.5 h-4 w-4 text-mongo-green border-gray-600 rounded focus:ring-mongo-green bg-gray-700" checked>
+                        <div class="flex-1">
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="font-mono text-sm font-medium text-gray-300 truncate" title="{{ thread.file_path }}">{{ thread.file_path }}</span>
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {{ 'bg-green-500/10 text-green-400' if thread.status == 'RESOLVED' else 'bg-red-500/10 text-red-400' }}">
+                                    {{ thread.status }}
+                                </span>
+                            </div>
+                            <div class="text-sm text-gray-400 line-clamp-2">
+                                <span class="font-semibold text-white">{{ thread.conversation[0].author }}:</span> 
+                                {{ thread.conversation[0].text }}
+                            </div>
+                            <div class="text-xs text-gray-500 mt-2 flex items-center gap-1">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"></path></svg>
+                                {{ thread.conversation|length }} comments
+                            </div>
+                        </div>
+                    </div>
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="mb-8 p-6 bg-gray-800 rounded-xl border border-gray-700">
+            <h3 class="text-lg font-semibold mb-3 text-white">Analysis Configuration</h3>
+            
+            <!-- Context Indexing Configuration -->
+            <div x-data="{ 
+                selectedPaths: [], 
+                repoFiles: [],
+                loadingFiles: true,
+                aiLoading: false,
+                aiReasoning: '',
+                usedAi: false,
+                searchFilter: '',
+                showPicker: false,
+                
+                async init() {
+                    // 1. Fetch Full File Tree
+                    try {
+                        const r = await fetch(`/repos/{{ owner }}/{{ repo }}/structure`);
+                        const data = await r.json();
+                        this.repoFiles = data.directories || [];
+                        this.loadingFiles = false;
+                    } catch (e) {
+                        console.error('Error fetching file tree', e);
+                        this.loadingFiles = false;
+                    }
+
+                    // 2. Auto-trigger AI Suggestion
+                    this.askAI(true);
+                },
+                async askAI(isAuto = false) {
+                    this.aiLoading = true;
+                    try {
+                        const res = await fetch(`/repos/{{ owner }}/{{ repo }}/prs/{{ pr_number }}/suggest_context`);
+                        const data = await res.json();
+                        
+                        this.selectedPaths = data.selected_paths;
+                        this.aiReasoning = data.reasoning;
+                        this.usedAi = true;
+                        
+                    } catch (e) {
+                        console.error('Error getting suggestions', e);
+                        if (!isAuto) alert('Error getting suggestions');
+                    }
+                    this.aiLoading = false;
+                },
+                togglePath(path) {
+                    if (this.selectedPaths.includes(path)) {
+                        this.selectedPaths = this.selectedPaths.filter(p => p !== path);
+                    } else {
+                        this.selectedPaths.push(path);
+                    }
+                    this.usedAi = false;
+                    this.searchFilter = ''; 
+                },
+                removePath(index) {
+                    this.selectedPaths.splice(index, 1);
+                    this.usedAi = false; 
+                },
+                filteredFiles() {
+                    if (!this.searchFilter) return this.repoFiles.slice(0, 50); 
+                    return this.repoFiles.filter(f => f.toLowerCase().includes(this.searchFilter.toLowerCase())).slice(0, 50);
+                }
+            }" class="mb-6 bg-gray-900/50 p-4 rounded-lg border border-gray-700 relative overflow-hidden transition-all duration-300">
+                
+                <div class="flex justify-between items-center mb-4">
+                    <h4 class="text-sm font-bold text-gray-300 flex items-center gap-2">
+                        <svg class="w-4 h-4 text-mongo-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 01-2-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                        Targeted Context Paths
+                        <span x-show="usedAi" class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-900 text-green-300 border border-green-700 transition-opacity">
+                            ✨ AI Optimized
+                        </span>
+                    </h4>
+                    <button type="button" @click="askAI()" :disabled="aiLoading" class="text-xs bg-gray-800 border border-gray-600 text-gray-300 px-3 py-1.5 rounded-md hover:bg-gray-700 hover:text-white transition-colors shadow-sm flex items-center gap-2">
+                        <span x-show="aiLoading" class="animate-spin text-mongo-green">⟳</span>
+                        <span>Re-run AI Analysis</span>
+                    </button>
+                </div>
+                
+                <!-- AI Reasoning Box -->
+                <div x-show="aiReasoning" class="mb-4 p-4 bg-gray-800 text-gray-300 text-xs rounded-lg border border-gray-600 flex gap-3 items-start shadow-sm">
+                    <svg class="w-5 h-5 flex-shrink-0 text-mongo-green mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <div>
+                        <span class="font-bold block mb-1 text-mongo-green">AI Reasoning</span>
+                        <p x-text="aiReasoning" class="leading-relaxed"></p>
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    <!-- Selected Paths Tags -->
+                    <div class="flex flex-wrap gap-2">
+                        <template x-for="(path, index) in selectedPaths" :key="index">
+                            <span class="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-gray-800 text-gray-300 border border-gray-600 group hover:border-red-500/50 transition-colors">
+                                <span x-text="path"></span>
+                                <input type="hidden" name="indexing_paths" :value="path">
+                                <button type="button" @click="removePath(index)" class="ml-2 text-gray-500 group-hover:text-red-400 focus:outline-none">
+                                    &times;
+                                </button>
+                            </span>
+                        </template>
+                        
+                        <!-- Add Path Trigger -->
+                        <div class="relative">
+                            <button type="button" @click="showPicker = !showPicker; if(showPicker) $nextTick(() => $refs.searchInput.focus())" class="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-gray-800 text-mongo-green border border-gray-600 border-dashed hover:border-mongo-green hover:bg-gray-700 transition-colors">
+                                + Add Path
+                            </button>
+                            
+                            <!-- File Picker Dropdown -->
+                            <div x-show="showPicker" @click.away="showPicker = false" x-transition class="absolute z-50 mt-2 w-72 bg-gray-800 border border-gray-600 rounded-lg shadow-xl overflow-hidden">
+                                <div class="p-2 border-b border-gray-700">
+                                    <input x-ref="searchInput" x-model="searchFilter" type="text" placeholder="Search files & folders..." class="w-full bg-gray-900 border border-gray-600 text-gray-200 text-xs rounded px-2 py-1.5 focus:border-mongo-green focus:ring-1 focus:ring-mongo-green outline-none placeholder-gray-500">
+                                </div>
+                                <div class="max-h-60 overflow-y-auto custom-scrollbar">
+                                    <template x-for="file in filteredFiles()" :key="file">
+                                        <div @click="togglePath(file)" class="px-3 py-2 hover:bg-gray-700 cursor-pointer flex items-center gap-2 text-xs text-gray-300 transition-colors">
+                                            <svg class="w-4 h-4 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" x-show="!file.includes('.')"></path>
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" x-show="file.includes('.')"></path>
+                                            </svg>
+                                            <span x-text="file" class="truncate"></span>
+                                            <span x-show="selectedPaths.includes(file)" class="ml-auto text-mongo-green">&check;</span>
+                                        </div>
+                                    </template>
+                                    <div x-show="repoFiles.length === 0 && !loadingFiles" class="px-3 py-4 text-center text-gray-500 text-xs">
+                                        No files found.
+                                    </div>
+                                    <div x-show="loadingFiles" class="px-3 py-4 text-center text-gray-500 text-xs">
+                                        Loading file tree...
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div x-show="selectedPaths.length === 0 && !aiLoading" class="text-xs text-yellow-500/80 flex items-center gap-1">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                        No paths selected. Indexing will default to root (slower).
+                    </div>
+                </div>
+            </div>
+
+            <div class="mb-4">
+                <label for="customPrompt" class="block text-gray-400 text-sm font-medium mb-2">Custom Instructions (Optional)</label>
+                <textarea name="custom_prompt" id="customPrompt" rows="3" class="w-full bg-gray-900 border-gray-700 text-white rounded-lg shadow-sm focus:border-mongo-green focus:ring-mongo-green text-sm" placeholder="e.g. Focus on security vulnerabilities, performance issues, or adherence to SOLID principles..."></textarea>
+            </div>
+
+            <div class="flex flex-wrap gap-2">
+                <button type="button" onclick="setPrompt('Analyze the code changes for potential security vulnerabilities (OWASP Top 10) and performance bottlenecks (e.g., O(n^2) loops, N+1 queries). Be strict.')" class="text-xs font-medium bg-gray-700 text-gray-300 border border-gray-600 hover:bg-gray-600 hover:text-white px-3 py-1.5 rounded-full transition-colors shadow-sm">
+                    🔒 Security & Perf
+                </button>
+                <button type="button" onclick="setPrompt('Evaluate the adherence to SOLID principles and Clean Architecture. Are we introducing technical debt or coupling? Suggest refactoring if necessary.')" class="text-xs font-medium bg-gray-700 text-gray-300 border border-gray-600 hover:bg-gray-600 hover:text-white px-3 py-1.5 rounded-full transition-colors shadow-sm">
+                    🏗️ Architecture Check
+                </button>
+                <button type="button" onclick="setPrompt('Identify missing test cases, edge cases (nulls, empty lists, boundary conditions) that are not covered. Propose specific test scenarios.')" class="text-xs font-medium bg-gray-700 text-gray-300 border border-gray-600 hover:bg-gray-600 hover:text-white px-3 py-1.5 rounded-full transition-colors shadow-sm">
+                    🧪 Testing & Edge Cases
+                </button>
+                <button type="button" onclick="setPrompt('Summarize the unresolved threads and propose code fixes.')" class="text-xs font-medium bg-gray-700 text-gray-300 border border-gray-600 hover:bg-gray-600 hover:text-white px-3 py-1.5 rounded-full transition-colors shadow-sm">
+                    🛠️ Fix Unresolved
+                </button>
+            </div>
+        </div>
+
+        <button type="submit" class="w-full bg-mongo-green hover:bg-green-400 text-mongo-slate font-bold py-4 px-6 rounded-xl shadow-lg hover:shadow-green-500/20 transform hover:-translate-y-0.5 transition-all duration-200 flex justify-center items-center gap-2">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            Analyze Selected Threads with AI
+        </button>
+    </form>
+
+    <div id="results" class="mt-8"></div>
+
+    <!-- Progress Modal -->
+    <div id="progressModal" class="fixed inset-0 bg-black/80 flex items-center justify-center z-50 hidden opacity-0 transition-opacity duration-300">
+        <div class="bg-mongo-dark rounded-2xl shadow-2xl p-8 max-w-lg w-full border border-gray-700 transform scale-95 transition-transform duration-300" id="progressCard">
+            <div class="text-center mb-6">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-900/30 text-mongo-green mb-4 animate-pulse">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>
+                </div>
+                <h3 class="text-2xl font-bold text-white">Analyzing Code...</h3>
+                <p class="text-gray-400 mt-2">Our AI agents are reviewing the PR context.</p>
+            </div>
+            
+            <div class="bg-gray-900 rounded-lg p-4 h-48 overflow-y-auto border border-gray-800 font-mono text-xs text-gray-300 space-y-2 custom-scrollbar" id="progressLog">
+                <!-- Log items will appear here -->
+                <div class="text-mongo-green">Connecting to server...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function setPrompt(text) {
+            document.getElementById('customPrompt').value = text;
+        }
+
+        // Generate Client ID
+        const clientId = crypto.randomUUID();
+        document.getElementById('clientId').value = clientId;
+
+        const form = document.getElementById('analyzeForm');
+        const modal = document.getElementById('progressModal');
+        const modalContent = document.getElementById('progressCard');
+        const logContainer = document.getElementById('progressLog');
+
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            // Show Modal
+            modal.classList.remove('hidden');
+            // Small delay to allow display:block to apply before opacity transition
+            setTimeout(() => {
+                modal.classList.remove('opacity-0');
+                modalContent.classList.remove('scale-95');
+                modalContent.classList.add('scale-100');
+            }, 10);
+
+            // Connect to EventSource for Progress
+            const evtSource = new EventSource(`/progress/${clientId}`);
+            
+            evtSource.onmessage = function(event) {
+                const msg = event.data;
+                // Race condition fix: Wait for connection confirmation
+                if (msg === "CONNECTED") {
+                     // Only submit form once SSE is confirmed active
+                     submitAnalysis();
+                     return;
+                }
+
+                const div = document.createElement('div');
+                div.textContent = `> ${msg}`;
+                
+                // Color coding
+                if (msg.includes('✅')) div.className = 'text-green-400 font-bold';
+                else if (msg.includes('🚀')) div.className = 'text-mongo-green font-bold';
+                else if (msg.includes('📦')) div.className = 'text-yellow-500';
+                else if (msg.includes('❌')) div.className = 'text-red-500 font-bold';
+                
+                logContainer.appendChild(div);
+                logContainer.scrollTop = logContainer.scrollHeight;
+            };
+
+            async function submitAnalysis() {
+                try {
+                    // Submit Form via Fetch
+                    const formData = new FormData(form);
+                    const response = await fetch('/analyze', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (response.ok) {
+                        const html = await response.text();
+                        document.open();
+                        document.write(html);
+                        document.close();
+                    } else {
+                        alert("Analysis failed. Please try again.");
+                        modal.classList.add('hidden');
+                    }
+                } catch (err) {
+                    console.error(err);
+                    alert("Network error.");
+                    modal.classList.add('hidden');
+                } finally {
+                    evtSource.close();
+                }
+            }
+        });
+    </script>
+{% endblock %}

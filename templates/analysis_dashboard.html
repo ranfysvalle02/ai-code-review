@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div x-data="{ 
+    jobId: '{{ job_id }}',
+    results: [],
+    activeTab: null,
+    progress: 'Initializing...',
+    status: 'running',
+    repo_stats: null,
+    showModal: true,
+    
+    init() {
+        const evtSource = new EventSource(`/analyze/job/${this.jobId}/stream`);
+        
+        evtSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'progress') {
+                this.progress = data.msg;
+                this.log(data.msg, 'info');
+            } else if (data.type === 'log') {
+                this.log(data.msg, 'debug');
+            } else if (data.type === 'indexed') {
+                this.repo_stats = data.stats;
+                this.log(`Indexed ${data.stats.total_files} files into vector store.`, 'success');
+            } else if (data.type === 'result') {
+                // Add result to array
+                this.results.push(data.payload);
+                this.log(`Analyzed thread: ${data.payload.file}`, 'success');
+                // If first result, activate tab
+                if (!this.activeTab) {
+                    this.activeTab = data.payload.id;
+                }
+            } else if (data.type === 'done') {
+                this.status = 'complete';
+                this.progress = 'Analysis Complete';
+                this.log('Analysis job completed successfully.', 'success');
+                evtSource.close();
+            } else if (data.type === 'error') {
+                this.status = 'error';
+                this.progress = 'Error: ' + data.msg;
+                this.log(data.msg, 'error');
+                evtSource.close();
+            }
+        };
+        
+        evtSource.onerror = () => {
+            if (this.status !== 'complete') {
+                this.status = 'error';
+                this.progress = 'Connection lost.';
+                this.log('Stream connection interrupted.', 'error');
+            }
+            evtSource.close();
+        };
+    },
+    
+    log(msg, type = 'info') {
+        const logContainer = document.getElementById('stepLog');
+        if (!logContainer) return;
+        
+        const div = document.createElement('div');
+        div.className = 'flex gap-3 py-1 border-b border-gray-800/50 last:border-0';
+        
+        const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+        
+        let icon = '🔹';
+        let colorClass = 'text-gray-300';
+        
+        if (type === 'error') {
+            icon = '❌';
+            colorClass = 'text-red-400 font-bold';
+        } else if (type === 'success') {
+            icon = '✅';
+            colorClass = 'text-green-400 font-bold';
+        } else if (type === 'debug') {
+            icon = '⚙️';
+            colorClass = 'text-gray-500 italic';
+        }
+        
+        div.innerHTML = `
+            <span class='text-gray-600 font-mono text-xs pt-0.5 select-none'>${timestamp}</span>
+            <div class='flex-1'>
+                <span class='mr-2'>${icon}</span>
+                <span class='${colorClass}'>${msg}</span>
+            </div>
+        `;
+        
+        logContainer.appendChild(div);
+        logContainer.scrollTop = logContainer.scrollHeight;
+    }
+}">
+    
+    <!-- Analysis Progress Modal -->
+    <div x-show="showModal" 
+         style="display: none;" 
+         class="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4"
+         x-transition:enter="ease-out duration-300"
+         x-transition:enter-start="opacity-0"
+         x-transition:enter-end="opacity-100"
+         x-transition:leave="ease-in duration-200"
+         x-transition:leave-start="opacity-100"
+         x-transition:leave-end="opacity-0">
+         
+        <div class="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden ring-1 ring-white/10"
+             @click.away="if(status === 'complete') showModal = false">
+            
+            <!-- Header -->
+            <div class="bg-gray-800/50 px-6 py-4 border-b border-gray-700 flex justify-between items-center">
+                <h2 class="text-xl font-bold text-white flex items-center gap-3">
+                    <template x-if="status === 'running'">
+                        <span class="relative flex h-3 w-3">
+                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-mongo-green opacity-75"></span>
+                          <span class="relative inline-flex rounded-full h-3 w-3 bg-mongo-green"></span>
+                        </span>
+                    </template>
+                    <template x-if="status === 'complete'">
+                        <span class="text-green-500 text-lg">✨</span>
+                    </template>
+                    <template x-if="status === 'error'">
+                        <span class="text-red-500 text-lg">⚠️</span>
+                    </template>
+                    
+                    <span x-text="status === 'running' ? 'AI Agent Working...' : (status === 'complete' ? 'Analysis Ready' : 'Analysis Failed')"></span>
+                </h2>
+                
+                <button x-show="status !== 'running'" @click="showModal = false" class="text-gray-400 hover:text-white transition-colors">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+
+            <!-- Body -->
+            <div class="p-6">
+                <!-- Status Bar -->
+                <div class="mb-6">
+                    <div class="flex justify-between text-xs font-bold uppercase tracking-wider mb-2">
+                        <span class="text-mongo-green" x-text="progress"></span>
+                        <span class="text-gray-500" x-text="status === 'running' ? Math.round(results.length * 10) + '%' : '100%'"></span>
+                    </div>
+                    <div class="h-2 bg-gray-800 rounded-full overflow-hidden relative">
+                        <!-- Indeterminate loading bar when running -->
+                        <div x-show="status === 'running'" class="absolute inset-0 bg-mongo-green/20 animate-pulse"></div>
+                        <div class="h-full bg-mongo-green transition-all duration-300 relative z-10"
+                             :class="status === 'running' ? 'animate-progress-indeterminate' : 'w-full'"></div>
+                    </div>
+                </div>
+
+                <!-- Step-by-Step Log -->
+                <div class="bg-black/40 rounded-xl border border-gray-800 p-4 h-80 overflow-y-auto custom-scrollbar font-mono text-sm shadow-inner space-y-2" id="stepLog">
+                    <div class="text-gray-500 italic text-xs mb-2 text-center">--- Live Execution Log ---</div>
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="bg-gray-800/30 px-6 py-4 border-t border-gray-700 flex justify-between items-center">
+                <div class="text-xs text-gray-500">
+                    <span x-show="repo_stats">
+                        Context: <span class="text-gray-300" x-text="repo_stats.total_files"></span> files indexed
+                    </span>
+                </div>
+                
+                <button x-show="status === 'complete'" 
+                        @click="showModal = false" 
+                        class="px-6 py-2 bg-mongo-green text-mongo-dark font-bold rounded-lg hover:bg-white transition-all shadow-lg shadow-mongo-green/20 transform hover:-translate-y-0.5">
+                    View Results
+                </button>
+                
+                 <button x-show="status === 'error'" 
+                        @click="window.location.reload()" 
+                        class="px-6 py-2 bg-red-900/50 text-red-200 border border-red-800 font-bold rounded-lg hover:bg-red-900 transition-all">
+                    Retry
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Dashboard Header -->
+    <div class="flex justify-between items-center mb-8 border-b border-gray-700 pb-4">
+        <div>
+            <h2 class="text-2xl font-bold text-white">Analysis Results</h2>
+            <p class="text-sm text-gray-400 mt-1">
+                {{ owner }}/{{ repo }} &bull; PR #{{ pr_number }}
+            </p>
+        </div>
+        
+        <div class="flex gap-3">
+            <button @click="showModal = true" class="text-xs text-gray-400 hover:text-white border border-gray-700 rounded px-3 py-1 hover:border-gray-500 transition-colors">
+                Show Logs
+            </button>
+            <a href="/repos/{{ owner }}/{{ repo }}/prs/{{ pr_number }}" class="text-sm text-mongo-green hover:text-white transition-colors">
+                &larr; Back to Selection
+            </a>
+        </div>
+    </div>
+
+    <!-- Results Area -->
+    <div class="flex flex-col md:flex-row gap-6">
+        <!-- Sidebar Tabs -->
+        <div class="w-full md:w-64 flex-shrink-0 flex flex-col gap-4">
+            <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1 px-2">Analyzed Threads</h3>
+            
+            <div class="space-y-2">
+                <template x-for="res in results" :key="res.id">
+                    <button @click="activeTab = res.id" 
+                        class="w-full text-left px-4 py-3 rounded-lg border transition-all duration-200 group relative overflow-hidden"
+                        :class="activeTab === res.id ? 'bg-gray-800 border-mongo-green shadow-lg shadow-mongo-green/10' : 'bg-gray-900/50 border-gray-800 hover:bg-gray-800 hover:border-gray-700'">
+                        
+                        <div class="flex justify-between items-start mb-1">
+                            <span class="font-mono text-xs font-semibold truncate w-full" 
+                                  :class="activeTab === res.id ? 'text-white' : 'text-gray-400 group-hover:text-gray-300'"
+                                  x-text="res.file"></span>
+                        </div>
+                        
+                        <div class="flex items-center justify-between">
+                            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"
+                                  :class="res.status === 'RESOLVED' ? 'text-green-400 bg-green-900/20' : 'text-red-400 bg-red-900/20'"
+                                  x-text="res.status"></span>
+                            
+                            <span x-show="activeTab === res.id" class="w-1.5 h-1.5 rounded-full bg-mongo-green shadow-[0_0_8px_rgba(0,237,100,0.8)]"></span>
+                        </div>
+                    </button>
+                </template>
+                
+                <div x-show="results.length === 0" class="px-4 py-8 text-center text-gray-500 text-xs italic border border-gray-800 rounded-lg bg-gray-900/30">
+                    No results yet...
+                </div>
+            </div>
+        </div>
+
+        <!-- Content Area -->
+        <div class="flex-1 min-w-0">
+            <template x-for="res in results" :key="res.id">
+                <div x-show="activeTab === res.id" x-html="res.html" class="fade-in"></div>
+            </template>
+            
+            <div x-show="results.length === 0" class="h-96 flex flex-col items-center justify-center text-gray-500 border border-gray-800 border-dashed rounded-xl bg-gray-900/20">
+                <svg class="w-16 h-16 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+                <p class="text-lg font-medium text-gray-400">Waiting for analysis results...</p>
+                <p class="text-sm text-gray-600 mt-2">Check the logs for progress</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    @keyframes progress-indeterminate {
+        0% { transform: translateX(-100%) scaleX(0.2); }
+        50% { transform: translateX(0%) scaleX(0.5); }
+        100% { transform: translateX(100%) scaleX(0.2); }
+    }
+    .animate-progress-indeterminate {
+        animation: progress-indeterminate 1.5s infinite linear;
+    }
+</style>
+{% endblock %}

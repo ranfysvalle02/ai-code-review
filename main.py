@@ -1,228 +1,345 @@
+# Copyright (C) 2025 Fabian Valle-simmons
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import os
 import json
 import asyncio
-import requests
-from typing import Optional, List, Dict, Any
+from typing import List, Optional, Dict
+from fastapi import FastAPI, Request, Form, HTTPException, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
+from services import GitHubFetcher, AIReviewer, git_sandbox, VectorStore
 
-# OpenAI & Pydantic
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
-
-# --- LOAD SECRETS ---
 load_dotenv()
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
 
-REPO_OWNER = os.getenv("GITHUB_REPO_OWNER")
-REPO_NAME = os.getenv("GITHUB_REPO_NAME")
-BRANCH_NAME = os.getenv("GITHUB_BRANCH_NAME")
+# In-memory store for active progress logs (client_id -> queue)
+active_connections: Dict[str, asyncio.Queue] = {}
 
-if not all([GITHUB_TOKEN, OPENAI_API_KEY, REPO_OWNER, REPO_NAME, BRANCH_NAME]):
-    raise ValueError("❌ Missing environment variables. Please check your .env file.")
+# In-memory store for analysis jobs (job_id -> dict)
+analysis_jobs: Dict[str, Dict] = {}
 
-# --- AI MODELS ---
-class CodeSuggestion(BaseModel):
-    summary: str = Field(..., description="A 1-sentence summary of the disagreement or discussion.")
-    severity: str = Field(..., description="How critical is this? (Low, Medium, High)")
-    proposed_fix: Optional[str] = Field(None, description="The specific Python code to resolve the issue. Null if no code change is needed.")
-    reasoning: str = Field(..., description="Why this fix is the correct solution based on the conversation.")
+def get_github_fetcher():
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=500, detail="GITHUB_TOKEN not configured")
+    return GitHubFetcher(token)
 
-# --- CLASS: GITHUB FETCHER ---
-class GitHubFetcher:
-    def __init__(self, token, owner, repo, branch):
-        self.headers = {"Authorization": f"Bearer {token}"}
-        self.owner = owner
-        self.repo = repo
-        self.branch = branch
-        self.url = "https://api.github.com/graphql"
+def get_ai_reviewer():
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    return AIReviewer(api_key)
 
-    def get_pr_context(self) -> Optional[List[Dict[str, Any]]]:
-        print(f"--- 🔍 Fetching Context for Branch: {self.branch} ---")
-        
-        query = """
-        query($owner: String!, $repo: String!, $branch: String!) {
-          repository(owner: $owner, name: $repo) {
-            pullRequests(headRefName: $branch, first: 1, states: OPEN) {
-              nodes {
-                number
-                title
-                reviewThreads(first: 50) {
-                  nodes {
-                    isResolved
-                    path
-                    comments(first: 50) { 
-                      nodes {
-                        author { login }
-                        body
-                        createdAt
-                        diffHunk 
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        """
-        
-        variables = {"owner": self.owner, "repo": self.repo, "branch": self.branch}
-        response = requests.post(self.url, json={"query": query, "variables": variables}, headers=self.headers)
-        
-        if response.status_code != 200:
-            print(f"❌ API Error: {response.status_code}\n{response.text}")
-            return None
+def get_vector_store():
+    voyage_key = os.getenv("VOYAGE_API_KEY")
+    if not voyage_key:
+        print("⚠️ VOYAGE_API_KEY not set. Semantic search will be disabled.")
+        return None
+    return VectorStore(voyage_key)
 
-        data = response.json()
-        if "errors" in data:
-            print("❌ GraphQL Error:", data["errors"])
-            return None
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
-        try:
-            pr_list = data["data"]["repository"]["pullRequests"]["nodes"]
-            if not pr_list:
-                print(f"❌ No open PR found for branch: {self.branch}")
-                return None
+@app.post("/repos")
+async def search_repos(
+    owner: str = Form(...),
+    repo: str = Form(...),
+    search_term: Optional[str] = Form(None)
+):
+    url = f"/repos/{owner}/{repo}"
+    if search_term and search_term.strip():
+        url += f"?search={search_term.strip()}"
+    return RedirectResponse(url=url, status_code=303)
 
-            threads = pr_list[0]["reviewThreads"]["nodes"]
-            return self._parse_threads(threads)
+@app.get("/search", response_class=HTMLResponse)
+async def search_page(request: Request):
+    return templates.TemplateResponse("repo_search.html", {"request": request})
 
-        except KeyError as e:
-            print(f"❌ Error parsing response: {e}")
-            return None
-
-    def _parse_threads(self, threads):
-        llm_context = []
-        for thread in threads:
-            if not thread["comments"]["nodes"]:
-                continue
-
-            thread_data = {
-                "file_path": thread["path"],
-                "status": "RESOLVED" if thread["isResolved"] else "UNRESOLVED",
-                "code_snippet": "", 
-                "conversation": []
-            }
-
-            # Extract diff hunk
-            for c in thread["comments"]["nodes"]:
-                if c.get("diffHunk"):
-                    thread_data["code_snippet"] = c["diffHunk"]
-                    break
-
-            # Extract conversation
-            for c in thread["comments"]["nodes"]:
-                msg = {
-                    "author": c["author"]["login"] if c["author"] else "Unknown",
-                    "timestamp": c["createdAt"],
-                    "text": c["body"]
-                }
-                thread_data["conversation"].append(msg)
-
-            llm_context.append(thread_data)
-        
-        return llm_context
-
-# --- CLASS: AI REVIEWER ---
-class AIReviewer:
-    def __init__(self, api_key):
-        self.client = AsyncOpenAI(api_key=api_key)
-
-    async def analyze_thread(self, thread_data):
-        system_prompt = (
-            "You are an expert Senior Software Engineer acting as a mediator. "
-            "Review the following GitHub Pull Request comment thread. "
-            "Your goal is to summarize the conversation and, if unresolved, propose a code fix."
-        )
-
-        user_content = f"""
-        STATUS: {thread_data['status']}
-        FILE: {thread_data['file_path']}
-        
-        --- CODE SNIPPET (DIFF) ---
-        {thread_data.get('code_snippet', '(No code snippet provided)')}
-        
-        --- CONVERSATION ---
-        {json.dumps(thread_data['conversation'], indent=2)}
-        
-        INSTRUCTIONS:
-        1. If STATUS is 'RESOLVED', just summarize the discussion. Set 'proposed_fix' to null.
-        2. If STATUS is 'UNRESOLVED', summarize the blocking issue and write the EXACT code change needed to fix it in 'proposed_fix'.
-        """
-
-        try:
-            completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o-2024-08-06",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                response_format=CodeSuggestion,
-            )
-            return {
-                "file": thread_data["file_path"],
-                "status": thread_data["status"],
-                "ai_analysis": completion.choices[0].message.parsed
-            }
-        except Exception as e:
-            print(f"❌ Error analyzing {thread_data['file_path']}: {e}")
-            return None
-
-    async def analyze_batch(self, threads):
-        print(f"🚀 Starting parallel AI analysis of {len(threads)} threads...")
-        tasks = [self.analyze_thread(t) for t in threads]
-        return await asyncio.gather(*tasks)
-
-# --- REPORT GENERATOR ---
-def print_report(results):
-    print("\n" + "="*60)
-    print("🤖 AI AUTO-REVIEW REPORT")
-    print("="*60)
-
-    for res in results:
-        if not res: continue
-        
-        analysis = res['ai_analysis']
-        icon = "✅" if res['status'] == "RESOLVED" else "🔴"
-        
-        print(f"\n{icon} [{res['status']}] {res['file']}")
-        print(f"   📝 Summary: {analysis.summary}")
-        
-        if res['status'] == "UNRESOLVED":
-            print(f"   🔥 Severity: {analysis.severity}")
-            print(f"   💡 Reasoning: {analysis.reasoning}")
-            
-            if analysis.proposed_fix:
-                print(f"\n   🛠️ PROPOSED FIX:\n   {'-'*30}")
-                print(analysis.proposed_fix)
-                print(f"   {'-'*30}")
-        
-        print("-" * 60)
-
-# --- MAIN EXECUTION ---
-async def main():
-    # 1. Fetch Context
-    fetcher = GitHubFetcher(GITHUB_TOKEN, REPO_OWNER, REPO_NAME, BRANCH_NAME)
-    context_data = fetcher.get_pr_context()
-
-    if not context_data:
-        print("⚠️ No context found or error occurred.")
-        return
-
-    print(f"✅ Successfully gathered {len(context_data)} threads.")
+@app.post("/search", response_class=HTMLResponse)
+async def perform_search(
+    request: Request,
+    query: str = Form(...),
+    language: Optional[str] = Form(None),
+    min_stars: Optional[str] = Form(None),
+    fetcher: GitHubFetcher = Depends(get_github_fetcher)
+):
+    # build query string
+    full_query = query
+    if language and language.strip():
+        full_query += f" language:{language.strip()}"
     
-    # Optional: Save context dump for debugging
-    with open("pr_context.json", "w") as f:
-        json.dump(context_data, f, indent=2)
+    if min_stars and min_stars.strip():
+        try:
+            # Validate it's an integer
+            stars_val = int(min_stars.strip())
+            full_query += f" stars:>={stars_val}"
+        except ValueError:
+            pass # Ignore invalid input
+    
+    results = fetcher.search_repositories(full_query)
+    return templates.TemplateResponse("repo_search.html", {
+        "request": request,
+        "results": results,
+        "query": query,
+        "language": language,
+        "min_stars": min_stars
+    })
 
-    # 2. Analyze with AI
-    reviewer = AIReviewer(OPENAI_API_KEY)
-    results = await reviewer.analyze_batch(context_data)
+@app.get("/repos/{owner}/{repo}", response_class=HTMLResponse)
+async def list_prs(
+    request: Request,
+    owner: str,
+    repo: str,
+    cursor: Optional[str] = None,
+    search: Optional[str] = None,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher)
+):
+    # If search term is present, use search API (defaults to OPEN state as per requirement)
+    if search:
+        data = fetcher.search_prs(owner, repo, search, cursor=cursor)
+    else:
+        # Fetch 100 most recent PRs of mixed states
+        data = fetcher.list_prs(owner, repo, states=["OPEN", "CLOSED", "MERGED"], cursor=cursor)
+    
+    if data is None:
+        return templates.TemplateResponse("index.html", {
+            "request": request, 
+            "error": "Could not fetch PRs. Check owner/repo and token."
+        })
+    
+    prs = data.get("nodes", [])
+    page_info = data.get("pageInfo", {})
+    
+    return templates.TemplateResponse("prs.html", {
+        "request": request, 
+        "owner": owner, 
+        "repo": repo, 
+        "prs": prs,
+        "page_info": page_info,
+        "current_cursor": cursor,
+        "search_term": search
+    })
 
-    # 3. Print Report
-    print_report(results)
+@app.get("/repos/{owner}/{repo}/prs/{pr_number}", response_class=HTMLResponse)
+async def pr_detail(
+    request: Request,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher)
+):
+    threads = fetcher.get_pr_threads(owner, repo, pr_number)
+    if threads is None:
+         return templates.TemplateResponse("prs.html", {
+            "request": request, 
+            "owner": owner, 
+            "repo": repo, 
+            "error": "Could not fetch threads."
+        })
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    return templates.TemplateResponse("pr_detail.html", {
+        "request": request,
+        "owner": owner,
+        "repo": repo,
+        "pr_number": pr_number,
+        "threads": threads
+    })
+
+@app.get("/repos/{owner}/{repo}/structure")
+async def get_repo_structure(
+    owner: str,
+    repo: str,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher)
+):
+    # Fetch full file tree for the picker
+    files = fetcher.get_file_tree(owner, repo)
+    if not files:
+        # Fallback to structure if tree fails
+        files = fetcher.get_repo_structure(owner, repo)
+        
+    if files is None:
+        raise HTTPException(status_code=404, detail="Could not fetch repo structure")
+    return {"directories": files}
+
+@app.get("/repos/{owner}/{repo}/prs/{pr_number}/suggest_context")
+async def suggest_context(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher),
+    reviewer: AIReviewer = Depends(get_ai_reviewer)
+):
+    # 1. Get Repo File Tree (Recursive)
+    file_tree = fetcher.get_file_tree(owner, repo)
+    if not file_tree:
+        # Fallback to simple structure if recursive fails
+        file_tree = fetcher.get_repo_structure(owner, repo) or []
+
+    # 2. Get PR Files
+    pr_files = fetcher.get_pr_files(owner, repo, pr_number)
+    
+    # 3. Ask AI
+    suggestion = await reviewer.suggest_indexing_paths(file_tree, pr_files)
+    
+    return suggestion
+
+@app.get("/progress/{client_id}")
+async def progress_stream(client_id: str):
+    async def event_generator():
+        # Yield initial connection message
+        yield "data: CONNECTED\n\n"
+        
+        queue = asyncio.Queue()
+        active_connections[client_id] = queue
+        try:
+            while True:
+                msg = await queue.get()
+                if msg == "DONE":
+                    break
+                yield f"data: {msg}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            active_connections.pop(client_id, None)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/analyze/job/{job_id}/stream")
+async def stream_analysis_job(
+    job_id: str,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher),
+    reviewer: AIReviewer = Depends(get_ai_reviewer)
+):
+    job_data = analysis_jobs.get(job_id)
+    if not job_data:
+        # Return a stream that immediately errors
+        async def error_generator():
+            yield f"data: {json.dumps({'type': 'error', 'msg': 'Job not found'})}\n\n"
+        return StreamingResponse(error_generator(), media_type="text/event-stream")
+
+    async def event_generator():
+        # Create a queue for logs/events
+        queue = asyncio.Queue()
+        
+        # Callback to push logs
+        def on_progress(msg):
+            # Push to stream
+            queue.put_nowait({"type": "log", "msg": msg})
+
+        # The worker task that runs the heavy logic
+        async def worker():
+            try:
+                # 1. Fetch Threads
+                on_progress("🔍 Fetching threads...")
+                all_threads = fetcher.get_pr_threads(job_data['owner'], job_data['repo'], job_data['pr_number'])
+                
+                # 2. Filter
+                selected_ids = set(job_data['selected_threads'])
+                threads_to_analyze = [t for t in all_threads if t["id"] in selected_ids]
+                
+                if not threads_to_analyze:
+                    queue.put_nowait({"type": "error", "msg": "No threads found"})
+                    return
+
+                # 3. Setup Sandbox & Indexing
+                token = os.getenv("GITHUB_TOKEN")
+                vector_store = get_vector_store()
+                
+                async with git_sandbox(job_data['owner'], job_data['repo'], token, pr_number=job_data['pr_number'], on_progress=on_progress) as sandbox_dir:
+                    if vector_store:
+                        stats = await vector_store.index_repo(sandbox_dir, include_paths=job_data['indexing_paths'], on_progress=on_progress)
+                        queue.put_nowait({"type": "indexed", "stats": stats})
+                    
+                    on_progress("🚀 Launching AI Agents...")
+                    
+                    # 4. Run Analysis in Parallel
+                    tasks = [
+                        reviewer.analyze_thread(t, sandbox_dir, job_data['custom_prompt'], retriever=vector_store) 
+                        for t in threads_to_analyze
+                    ]
+                    
+                    for future in asyncio.as_completed(tasks):
+                        result = await future
+                        if result:
+                            # Render HTML partial for this result
+                            html_content = templates.get_template("partials/thread_result.html").render(res=result)
+                            payload = {
+                                "id": result['id'],
+                                "file": result['file'],
+                                "status": result['status'],
+                                "html": html_content
+                            }
+                            queue.put_nowait({"type": "result", "payload": payload})
+                            on_progress(f"✅ Analysis complete for {result['file']}")
+                
+                queue.put_nowait({"type": "done"})
+                
+            except Exception as e:
+                print(f"Worker Error: {e}")
+                queue.put_nowait({"type": "error", "msg": str(e)})
+
+        # Start worker
+        task = asyncio.create_task(worker())
+
+        # Consume queue
+        while True:
+            # Wait for messages
+            data = await queue.get()
+            yield f"data: {json.dumps(data)}\n\n"
+            
+            if data['type'] in ['done', 'error']:
+                break
+        
+        # clean up
+        analysis_jobs.pop(job_id, None)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/analyze", response_class=HTMLResponse)
+async def analyze_threads(
+    request: Request,
+    owner: str = Form(...),
+    repo: str = Form(...),
+    pr_number: int = Form(...),
+    selected_threads: List[str] = Form([]),
+    indexing_paths: List[str] = Form(None),
+    custom_prompt: Optional[str] = Form(None)
+):
+    import uuid
+    job_id = str(uuid.uuid4())
+    
+    # Store job data
+    analysis_jobs[job_id] = {
+        "owner": owner,
+        "repo": repo,
+        "pr_number": pr_number,
+        "selected_threads": selected_threads,
+        "indexing_paths": indexing_paths,
+        "custom_prompt": custom_prompt
+    }
+    
+    # Render the dashboard shell immediately
+    return templates.TemplateResponse("analysis_dashboard.html", {
+        "request": request,
+        "job_id": job_id,
+        "owner": owner,
+        "repo": repo,
+        "pr_number": pr_number
+    })

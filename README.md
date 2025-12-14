@@ -1,377 +1,211 @@
-# Building an AI "Mediator" for GitHub PRs using GPT-4o and Structured Outputs
+# AI Open-Sourcerer
 
-We’ve all seen it happen. A Pull Request opens. A reviewer leaves a comment. The author replies. Suddenly, a 30-message thread explodes debating the merits of a specific design pattern or variable name.
+## Code is Cheap. Context is Expensive.
 
-The PR stalls. Context switching becomes painful as you jump between the code diff and a wall of text.
+![](wrking-results-go.png)
 
-Wouldn't it be amazing if an unbiased third party could step in, read the entire history of the argument, look at the code in question, and say: **"Here is the core disagreement, and here is the exact code change to fix it"**?
+**AI Open-Sourcerer** is a local "Context Engine" designed to help developers review and resolve complex GitHub Pull Request threads. It acts as a "Glass Box" tool that clones the repository, indexes the code semantically using Voyage AI, and uses OpenAI's GPT-4o to analyze discussions, validate code against tests, and propose specific fixes.
 
-In this post, we’re going to build exactly that: an AI-powered PR mediator using Python, GitHub’s GraphQL API, and OpenAI’s GPT-4o with Structured Outputs.
+We have entered a rapid-cycle era of engineering. With modern AI tooling, the time it takes to validate an idea or prototype a feature has collapsed. Syntactically, code has never been cheaper to write.
+
+But while we can generate logic instantly, **context** remains stubbornly expensive.
+
+My resolution for 2026 is to contribute significantly more to open source. But I’ve found that the bottleneck isn't writing the code—it's navigating the review.
+
+We’ve all been there. You find a high-impact repository. You spot a Pull Request that is 90% there but stuck in limbo. It’s not broken, but it’s blocked by five different conversation threads—debates about naming, edge cases, or test expectations. To help move it forward, you have to spend hours acting as a digital archaeologist, context-switching between threads just to offer a valid opinion on one of them.
+
+The constraint isn't keystrokes; it's clarity.
+
+**AI Open-Sourcerer** is a prototype designed to solve this specific friction. It is a local "Context Engine" that allows me to drop into a specific thread of a massive PR and resolve it immediately, without the ramp-up tax.
+
+## Features
+
+- **"Glass Box" Analysis**: Clones the repository into an ephemeral sandbox to analyze the actual code state, not just the diff.
+- **Semantic Context (RAG)**: Uses [Voyage AI](https://voyageai.com/) (`voyage-code-2`) to index the codebase and retrieve relevant dependencies for a given discussion thread.
+- **Structured Reasoning**: Uses OpenAI Structured Outputs (Pydantic) to force the AI to "think" step-by-step, analyze the debate, and check for race conditions or architectural mismatches.
+- **Interactive Dashboard**: A FastAPI + HTMX web interface to browse PRs, select threads, and stream analysis results in real-time.
+- **Smart Context**: Automatically suggests which files and documentation to index based on the PR's modified files.
+
+## Prerequisites
+
+- Python 3.8+
+- [GitHub Personal Access Token](https://github.com/settings/tokens) (with `repo` scope)
+- [OpenAI API Key](https://platform.openai.com/)
+- [Voyage AI API Key](https://voyageai.com/) (for semantic search)
+
+## Usage
+
+1. **Start the Application:**
+   ```bash
+   uvicorn main:app --reload
+   ```
+
+2. **Access the Web Interface:**
+   Open your browser and navigate to `http://localhost:8000`.
+
+3. **Workflow:**
+   - **Search:** Enter a GitHub repository owner and name (e.g., `fastapi/fastapi`).
+   - **Select PR:** Choose a Pull Request from the list.
+   - **Context:** The tool will suggest relevant files to index. You can adjust this selection.
+   - **Analyze:** Select specific discussion threads you want to resolve and click "Start Analysis".
+   - **Review:** Watch as the AI agents analyze each thread in parallel and generate a detailed report with proposed fixes.
+
 
 -----
 
-## The Goal
+## The Parable of the Stale PR
 
-We want a script that targets a specific Pull Request branch and does the following:
+![](working-1.png)
 
-1.  **Identifies all comment threads**, separating resolved from unresolved ones.
-2.  **Extracts context**: The conversation history *and* the relevant code snippet (the diff hunk) where the discussion is happening.
-3.  **Feeds this context to GPT-4o** with a specific persona: an expert Senior Software Engineer acting as a mediator.
-4.  **Returns structured data**: A summary, severity level, reasoning, and, crucially, the *exact proposed code fix*.
+PRs rarely get stuck "as a whole." They get stuck in the details—a specific disagreement on line 402 that stalls the entire merge for weeks.
 
-## The Challenge: Getting the Right Context
+To test this, I pointed the tool at a stalled PR in a widely used **Database Exporter** project. The code had been sitting untouched for months.
 
-The first hurdle is getting the data efficiently. GitHub's standard REST API is great, but getting comments, replies, thread status, *and* the associated diff hunk for every single thread requires way too many API calls.
+The discussion was stuck on a subtle mismatch between the implementation (filtering database views) and the unit test expectations. The PR had stalled because the maintainer and the contributor were talking past each other: the contributor thought the test should expect an error, while the maintainer implied it should just fail silently.
 
-This is where GraphQL shines. We can fetch everything we need in a single, precise query.
+The AI didn't just summarize the chat; it audited the test file against the source code, realized the test was asserting the wrong behavior, and provided the specific code to resolve **that specific thread**.
 
-We need to query repository `pullRequests`, dive into `reviewThreads`, and grab the `diffHunk` (the actual code context) along with the comment history.
+**Here is the actual output from the dashboard:**
 
-```graphql
-query($owner: String!, $repo: String!, $branch: String!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequests(headRefName: $branch, first: 1, states: OPEN) {
-      nodes {
-        # ... other PR details
-        reviewThreads(first: 50) {
-          nodes {
-            isResolved
-            path
-            comments(first: 50) { 
-              nodes {
-                author { login }
-                body
-                diffHunk  # <--- The magic sauce: the code context
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-```
+> **FILE:** `pkg/exporter/common_test.go`
+> **STATUS:** `UNRESOLVED` | **SEVERITY:** `MEDIUM`
+>
+> **Summary:** Test names and expected results in error handling of view filtering need updating to match recent code changes.
+>
+> **Technical Deep Dive:**
+>
+> 1.  **Code Analysis:** The test `TestCheckNamespaces` incorrectly expects an error when a "View" is encountered. The actual function was updated in this PR to silently exclude views and log a warning instead.
+> 2.  **Debate Evaluation:** The maintainer correctly pointed out that only collections should be returned. The test is asserting an outdated contract.
+> 3.  **Resolution Critique:** The code is correct, but the test suite is failing because it wasn't updated to reflect the new "silent exclusion" strategy.
+>
+> **Proposed Fix:**
+> *"Update test naming and adjust assertions to reflect logic that views are simply not returned."*
+>
+> ```go
+> t.Run("Views or non-exist namespace in provided collection list (should fail)", func(t *testing.T) {
+>     // We expect NO error, but the 'view01' should be missing from the result
+>     filtered, err := checkNamespacesForViewsOrNonExist(ctx, client, []string{"testdb01.col01", "testdb01.system.views", "testdb01.view01"}, nil)
+>     assert.NoError(t, err)
+>     assert.Equal(t, []string{"testdb01.col01"}, filtered)
+> })
+> ```
 
-## The "Secret Sauce": GPT-4o Structured Outputs
+This is the power of the tool. It doesn't magically "fix the PR" in one shot. It acts as a surgical instrument, allowing me to step into a complex debate, provide the exact code needed to resolve that thread, and unblock the maintainers to focus on the next one.
 
-Asking an LLM to "fix some code" usually results in a chatty response that requires complex regex to parse. We need reliable, machine-readable JSON.
+-----
 
-We use OpenAI's `response_format` feature, combined with **Pydantic**, to define exactly what the AI must return. If the LLM can't fit its answer into this schema, it tries again until it can.
+## The Architecture: "Glass Box" Design
 
-This guarantees that our script never crashes because the AI decided to add an introductory paragraph instead of just raw JSON.
+Most current AI tools act as "Black Boxes"—they want to take the wheel and drive. That works for greenfield scripts, but it fails for complex, existing systems where architectural nuances matter.
 
-Here is the Pydantic schema we'll use:
+I needed a researcher, not a replacement. I built this using three specific strategies to ensure transparency and speed.
 
-```python
-from pydantic import BaseModel, Field
-from typing import Optional
+### 1\. Ephemeral Sandboxing (`asyncio` + `tempfile`)
 
-class CodeSuggestion(BaseModel):
-    summary: str = Field(..., description="A 1-sentence summary of the disagreement or discussion.")
-    severity: str = Field(..., description="How critical is this? (Low, Medium, High)")
-    # This is the magic field. It's optional. If the thread is resolved, it's null.
-    # If unresolved, it contains the exact python code fix.
-    proposed_fix: Optional[str] = Field(None, description="The specific Python code to resolve the issue. Null if no code change is needed.")
-    reasoning: str = Field(..., description="Why this fix is the correct solution based on the conversation.")
-```
+Security and cleanliness are paramount when auditing third-party code. I didn't want a tool that messes with my local environment.
 
-## The Full Implementation
-
-We will combine these concepts into a single Python script. It uses `requests` for the synchronous GraphQL fetch and `asyncio` with the `openai` library to process multiple threads in parallel, speeding up analysis.
-
-Here is the complete `main.py`:
+I implemented an **Async Context Manager** that treats every analysis as an ephemeral event. It clones the repo into a temporary directory, performs the heavy lifting, and destroys the directory the moment the context exits.
 
 ```python
-import os
-import json
-import asyncio
-import requests
-from typing import Optional, List, Dict, Any
-# Remember to pip install python-dotenv
-from dotenv import load_dotenv
+@asynccontextmanager
+async def git_sandbox(owner: str, repo: str, token: str, pr_number: int = None, on_progress: Callable = None):
+    # Create a unique, temporary directory
+    sandbox_dir = tempfile.mkdtemp(prefix=f"sandbox_{owner}_{repo}_")
+    try:
+        # Clone heavily optimized (depth 1) for speed
+        clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+        
+        # Async subprocess execution to keep the UI responsive
+        await asyncio.to_thread(run_git, ["git", "clone", "--depth", "1", clone_url, sandbox_dir])
+        
+        # ... fetch PR logic ...
+        yield sandbox_dir
+    finally:
+        # Automatic cleanup guarantees no disk clutter
+        if os.path.exists(sandbox_dir):
+            await asyncio.to_thread(shutil.rmtree, sandbox_dir)
+```
 
-# OpenAI & Pydantic
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+### 2\. Semantic Indexing (Voyage AI)
 
-# --- LOAD SECRETS ---
-# Expects a .env file in the same directory
-load_dotenv()
+Standard RAG (Retrieval Augmented Generation) often fails on code because it treats it like English prose. It matches keywords but misses the *structure*.
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+I integrated **Voyage AI** (specifically `voyage-code-2`) to build a semantic index. This model understands programming concepts—imports, class hierarchies, and dependency injections. When the AI analyzes a thread, it retrieves not just the file that changed, but the *dependencies* of that file, providing a complete architectural picture.
 
-# Target Repository Config
-REPO_OWNER = os.getenv("GITHUB_REPO_OWNER")
-REPO_NAME = os.getenv("GITHUB_REPO_NAME")
-BRANCH_NAME = os.getenv("GITHUB_BRANCH_NAME")
+### 3\. Structured Reasoning (Pydantic)
 
-if not all([GITHUB_TOKEN, OPENAI_API_KEY, REPO_OWNER, REPO_NAME, BRANCH_NAME]):
-    raise ValueError("❌ Missing environment variables. Please check your .env file.")
+LLMs are stochastic; engineering requires precision. I didn't want the AI to "chat" with me. I wanted it to think.
 
-# --- AI MODELS (Pydantic Schema) ---
+I used **Pydantic** to enforce a strict output schema. The AI cannot just return text; it must fill out a `CodeSuggestion` object containing specific fields for `debate_analysis`, `race_condition_checks`, and a step-by-step `thinking_process`.
+
+```python
 class CodeSuggestion(BaseModel):
-    summary: str = Field(..., description="A 1-sentence summary of the disagreement or discussion.")
-    severity: str = Field(..., description="How critical is this? (Low, Medium, High)")
-    proposed_fix: Optional[str] = Field(None, description="The specific Python code to resolve the issue. Null if no code change is needed.")
-    reasoning: str = Field(..., description="Why this fix is the correct solution based on the conversation.")
+    summary: str = Field(..., description="A 1-sentence summary of the disagreement.")
+    severity: str = Field(..., description="Criticality: Low, Medium, High")
+    
+    # We force the model to 'think' step-by-step before concluding
+    thinking_process: List[str] = Field(..., description="Step-by-step reasoning.")
+    
+    debate_analysis: str = Field(..., description="Analysis of arguments using first principles.")
+    proposed_fix: Optional[str] = Field(None, description="The exact code fix, if needed.")
 
-# --- CLASS: GITHUB FETCHER ---
-class GitHubFetcher:
-    def __init__(self, token, owner, repo, branch):
-        self.headers = {"Authorization": f"Bearer {token}"}
-        self.owner = owner
-        self.repo = repo
-        self.branch = branch
-        self.url = "https://api.github.com/graphql"
-
-    def get_pr_context(self) -> Optional[List[Dict[str, Any]]]:
-        print(f"--- 🔍 Fetching Context for Branch: {self.branch} ---")
-        
-        # The GraphQL query to get threads, comments, and diffHunks
-        query = """
-        query($owner: String!, $repo: String!, $branch: String!) {
-          repository(owner: $owner, name: $repo) {
-            pullRequests(headRefName: $branch, first: 1, states: OPEN) {
-              nodes {
-                reviewThreads(first: 50) {
-                  nodes {
-                    isResolved
-                    path
-                    comments(first: 50) { 
-                      nodes {
-                        author { login }
-                        body
-                        createdAt
-                        diffHunk 
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        """
-        
-        variables = {"owner": self.owner, "repo": self.repo, "branch": self.branch}
-        response = requests.post(self.url, json={"query": query, "variables": variables}, headers=self.headers)
-        
-        if response.status_code != 200:
-            print(f"❌ API Error: {response.status_code}\n{response.text}")
-            return None
-
-        data = response.json()
-        if "errors" in data:
-            print("❌ GraphQL Error:", data["errors"])
-            return None
-
-        try:
-            pr_list = data["data"]["repository"]["pullRequests"]["nodes"]
-            if not pr_list:
-                print(f"❌ No open PR found for branch: {self.branch}")
-                return None
-
-            threads = pr_list[0]["reviewThreads"]["nodes"]
-            return self._parse_threads(threads)
-
-        except KeyError as e:
-            print(f"❌ Error parsing response: {e}")
-            return None
-
-    def _parse_threads(self, threads):
-        """Cleans raw GraphQL data into a list of thread contexts."""
-        llm_context = []
-        for thread in threads:
-            if not thread["comments"]["nodes"]:
-                continue
-
-            thread_data = {
-                "file_path": thread["path"],
-                "status": "RESOLVED" if thread["isResolved"] else "UNRESOLVED",
-                "code_snippet": "", 
-                "conversation": []
-            }
-
-            # Find the code snippet (diffHunk) associated with this thread
-            for c in thread["comments"]["nodes"]:
-                if c.get("diffHunk"):
-                    thread_data["code_snippet"] = c["diffHunk"]
-                    break
-
-            # Format the conversation history
-            for c in thread["comments"]["nodes"]:
-                msg = {
-                    "author": c["author"]["login"] if c["author"] else "Unknown",
-                    "text": c["body"]
-                }
-                thread_data["conversation"].append(msg)
-
-            llm_context.append(thread_data)
-        
-        return llm_context
-
-# --- CLASS: AI REVIEWER ---
-class AIReviewer:
-    def __init__(self, api_key):
-        self.client = AsyncOpenAI(api_key=api_key)
-
-    async def analyze_thread(self, thread_data):
-        """Sends a single thread context to GPT-4o for structured analysis."""
-        system_prompt = (
-            "You are an expert Senior Software Engineer acting as a mediator. "
-            "Review the following GitHub Pull Request comment thread. "
-            "Your goal is to summarize the conversation and, if unresolved, propose a code fix."
-        )
-
-        # We feed the AI the status, file path, the code diff, and the conversation history.
-        user_content = f"""
-        STATUS: {thread_data['status']}
-        FILE: {thread_data['file_path']}
-        
-        --- CODE SNIPPET (DIFF) ---
-        {thread_data.get('code_snippet', '(No code snippet provided)')}
-        
-        --- CONVERSATION ---
-        {json.dumps(thread_data['conversation'], indent=2)}
-        
-        INSTRUCTIONS:
-        1. If STATUS is 'RESOLVED', just summarize the discussion. Set 'proposed_fix' to null.
-        2. If STATUS is 'UNRESOLVED', summarize the blocking issue and write the EXACT code change needed to fix it in 'proposed_fix'.
-        """
-
-        try:
-            # The magic happens here: response_format=CodeSuggestion
-            completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o-2024-08-06",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                response_format=CodeSuggestion,
-            )
-            return {
-                "file": thread_data["file_path"],
-                "status": thread_data["status"],
-                "ai_analysis": completion.choices[0].message.parsed
-            }
-        except Exception as e:
-            print(f"❌ Error analyzing {thread_data['file_path']}: {e}")
-            return None
-
-    async def analyze_batch(self, threads):
-        print(f"🚀 Starting parallel AI analysis of {len(threads)} threads...")
-        # Process all threads simultaneously
-        tasks = [self.analyze_thread(t) for t in threads]
-        return await asyncio.gather(*tasks)
-
-# --- REPORT GENERATOR ---
-def print_report(results):
-    print("\n" + "="*60)
-    print("🤖 AI AUTO-REVIEW REPORT")
-    print("="*60)
-
-    for res in results:
-        if not res: continue
-        
-        analysis = res['ai_analysis']
-        icon = "✅" if res['status'] == "RESOLVED" else "🔴"
-        
-        print(f"\n{icon} [{res['status']}] {res['file']}")
-        print(f"   📝 Summary: {analysis.summary}")
-        
-        if res['status'] == "UNRESOLVED":
-            print(f"   🔥 Severity: {analysis.severity}")
-            print(f"   💡 Reasoning: {analysis.reasoning}")
-            
-            if analysis.proposed_fix:
-                print(f"\n   🛠️ PROPOSED FIX:\n   {'-'*30}")
-                # This output is pure code, ready to copy-paste
-                print(analysis.proposed_fix)
-                print(f"   {'-'*30}")
-        
-        print("-" * 60)
-
-# --- MAIN EXECUTION ---
-async def main():
-    # 1. Fetch Context from GitHub
-    fetcher = GitHubFetcher(GITHUB_TOKEN, REPO_OWNER, REPO_NAME, BRANCH_NAME)
-    context_data = fetcher.get_pr_context()
-
-    if not context_data:
-        print("⚠️ No context found or error occurred.")
-        return
-
-    print(f"✅ Successfully gathered {len(context_data)} threads.")
-
-    # 2. Analyze with AI in parallel
-    reviewer = AIReviewer(OPENAI_API_KEY)
-    results = await reviewer.analyze_batch(context_data)
-
-    # 3. Print Report
-    print_report(results)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# ... inside the analysis loop ...
+completion = await client.beta.chat.completions.parse(
+    model="gpt-4o-2024-08-06",
+    messages=[...],
+    response_format=CodeSuggestion, # <--- The magic happens here
+)
 ```
 
-## Running the Mediator
+-----
 
-To run this, you just need a `.env` file with your credentials and target repository info:
+## The Future: Fundamentals + Guardrails
 
-```ini
-GITHUB_TOKEN=your_github_pat
-OPENAI_API_KEY=sk-your_openai_key
-GITHUB_REPO_OWNER=my-org
-GITHUB_REPO_NAME=my-cool-app
-GITHUB_BRANCH_NAME=feature/login-fix
-```
+This project is currently a "Read-Only" tool—it helps me understand the code so I can help fix it. But it points toward how our industry is evolving.
 
-Run the script, and watch it work.
+We are entering the era of **"Vibe Coding"**—where developers focus on flow and intent, letting the AI handle implementation details. Right now, this workflow is in the worst state it's ever going to be. It feels messy. We generate code faster than ever, but we often drown in "almost-right" architecture that passes unit tests but breaks design patterns.
 
-### The Output
+But the industry is adapting. We are starting to see the emergence of **codified context**.
 
-Here is an example of what the script outputs when run against a PR with one resolved thread and one active argument about an asynchronous function:
+Tools like **Cursor** have recently introduced **Project Rules** (via `.cursor/rules` or `AGENTS.md`), which allow maintainers to bundle system-level instructions, prompts, and architecture decisions directly into the repository. This is a massive shift: it means "context" is becoming a checked-in artifact, just like your code.
 
-```text
---- 🔍 Fetching Context for Branch: feature/login-fix ---
-✅ Successfully gathered 2 threads.
-🚀 Starting parallel AI analysis of 2 threads...
+**AI Open-Sourcerer** builds on this philosophy. It’s not just about generating code; it's about retrieving that specific, codified context and using it as a guardrail.
 
-============================================================
-🤖 AI AUTO-REVIEW REPORT
-============================================================
+Imagine a workflow where you prototype a feature in an afternoon. Instead of spending three days fighting with a linter or arguing about style, you hand it off to an agent that:
 
-✅ [RESOLVED] src/utils/logger.py
-   📝 Summary: The reviewer suggested changing the log level from INFO to DEBUG, which the author accepted.
-------------------------------------------------------------
+1.  **Retrieves** the project's specific `CONTRIBUTING.md`, style guides, and `.cursor/rules`.
+2.  **Refactors** your "vibe code" to match the strict patterns of the repository.
+3.  **Generates** the documentation the maintainers actually want.
 
-🔴 [UNRESOLVED] src/api/users.py
-   🔥 Severity: High
-   💡 Reasoning: The current implementation uses a synchronous database call inside an async route handler, which will block the event loop and degrade performance under load. It needs to be awaited.
+It’s just about using AI to clean up the mess that AI creates.
 
-   🛠️ PROPOSED FIX:
-   ------------------------------
-   @router.get("/{user_id}")
-   async def get_user(user_id: int, db: Session = Depends(get_db)):
-       # Changed db.query(...) to await db.execute(...) for async compatibility
-       result = await db.execute(select(User).filter(User.id == user_id))
-       user = result.scalars().first()
-       if user is None:
-           raise HTTPException(status_code=404, detail="User not found")
-       return user
-   ------------------------------
-------------------------------------------------------------
-```
+**AI Open-Sourcerer** is my attempt to automate that cleanup. If you want to join me in making 2026 a year of high-impact contribution, the code is open.
 
-## Conclusion and Next Steps
+-----
 
-By combining GraphQL's ability to fetch deeply nested context with GPT-4o's structured output capabilities, we've created a powerful tool that cuts through the noise of PR comment sections.
+### Appendix: The Stack
 
-Instead of re-reading 20 comments to remember what the argument was about, you get a 1-sentence summary and the exact code needed to resolve it.
+For those interested in the implementation details, here is the tech stack that powers the engine:
 
-**Where could we take this next?**
+  * **Backend:** FastAPI (Python)
+  * **Concurrency:** `asyncio` for parallel agent execution.
+  * **Embeddings:** Voyage AI (`voyage-code-2`) for semantic code search.
+  * **Reasoning:** OpenAI (`gpt-4o`) with Structured Outputs (Pydantic).
+  * **Frontend:** HTMX + Jinja2 (No React/Vue overhead, just pure HTML over the wire).
+  * **Environment:** Ephemeral `tempfile` directories for security.
 
-1.  **GitHub Action:** Turn this script into an Action that runs automatically whenever a PR comment thread reaches a certain length.
-2.  **Auto-Suggest:** Instead of just printing to the console, use the GitHub API to post the `proposed_fix` directly back to the PR as a suggested change comment.
-3.  **Context Expansion:** Feed the AI related files (e.g., the unit test file corresponding to the code being modified) for even better suggestions.
+---
+
+## Project Structure
+
+- `main.py`: FastAPI application entry point and route definitions.
+- `services.py`: Core business logic including:
+  - `GitHubFetcher`: GraphQL client for GitHub API.
+  - `git_sandbox`: Async context manager for temporary repo cloning.
+  - `VectorStore`: Voyage AI integration for semantic indexing.
+  - `AIReviewer`: GPT-4o integration with structured outputs.
+- `templates/`: HTML templates for the UI.
+
+## Legacy CLI
+
+A legacy CLI version is available in `cli_legacy.py`, though the web interface is the recommended way to use the tool.

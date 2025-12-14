@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <div class="max-w-xl mx-auto text-center mb-10">
+        <h2 class="text-3xl font-extrabold text-white mb-2">Unleash the Magic</h2>
+        <p class="text-gray-400">Gain the context you need to make meaningful contributions in minutes.</p>
+    </div>
+    
+    {% if error %}
+    <div class="bg-red-900/50 border border-red-700 text-red-200 px-4 py-3 rounded-xl mb-8 flex items-center gap-2">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+        {{ error }}
+    </div>
+    {% endif %}
+
+    <form action="/repos" method="post" class="space-y-6 max-w-xl mx-auto">
+        <div class="grid grid-cols-2 gap-4">
+            <div class="col-span-1">
+                <label class="block text-sm font-medium text-mongo-green mb-1 uppercase tracking-wide">Owner</label>
+                <input type="text" name="owner" placeholder="e.g. mongodb" class="w-full bg-mongo-dark border border-gray-700 text-white p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600" required>
+            </div>
+            <div class="col-span-1">
+                <label class="block text-sm font-medium text-mongo-green mb-1 uppercase tracking-wide">Repo</label>
+                <input type="text" name="repo" placeholder="e.g. mongo" class="w-full bg-mongo-dark border border-gray-700 text-white p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600" required>
+            </div>
+        </div>
+        
+        <div>
+            <label class="block text-sm font-medium text-gray-400 mb-1">Search Term (Optional)</label>
+            <div class="relative">
+                <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                </span>
+                <input type="text" name="search_term" placeholder="e.g. aggregation, wiredtiger..." class="w-full bg-mongo-dark border border-gray-700 text-white pl-10 p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600">
+            </div>
+            <p class="text-xs text-gray-500 mt-2">Leave empty to see all recent Pull Requests.</p>
+        </div>
+        
+        <button type="submit" class="w-full bg-mongo-green hover:bg-green-400 text-mongo-slate font-bold text-lg py-4 px-6 rounded-xl shadow-lg hover:shadow-green-500/20 transform hover:-translate-y-0.5 transition-all duration-200 flex justify-center items-center gap-2">
+            <span>List Pull Requests</span>
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path></svg>
+        </button>
+    </form>
+
+    <div class="mt-8 text-center">
+        <a href="/search" class="text-gray-500 hover:text-mongo-green text-sm font-medium transition-colors flex items-center justify-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+            Don't know the exact repo? Search GitHub
+        </a>
+    </div>
+{% endblock %}
