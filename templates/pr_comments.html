@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div x-data="{
+    chatMessages: [],
+    chatInput: '',
+    chatLoading: false,
+    activeTab: 'comments',
+    
+    async sendMessage() {
+        if (!this.chatInput.trim() || this.chatLoading) return;
+        
+        const userMessage = this.chatInput.trim();
+        this.chatInput = '';
+        this.chatMessages.push({ role: 'user', content: userMessage });
+        this.chatLoading = true;
+        
+        try {
+            const response = await fetch(`/api/prs/{{ owner }}/{{ repo }}/{{ pr_number }}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: userMessage })
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to get response');
+            }
+            
+            const data = await response.json();
+            this.chatMessages.push({ role: 'assistant', content: data.response });
+        } catch (e) {
+            this.chatMessages.push({ role: 'assistant', content: 'Sorry, I encountered an error. Please try again.' });
+        } finally {
+            this.chatLoading = false;
+        }
+    }
+}">
+    <!-- Header -->
+    <div class="mb-6 flex items-center justify-between">
+        <div>
+            <h1 class="text-3xl font-bold text-white mb-2">{{ pr_title }}</h1>
+            <div class="flex items-center gap-4 text-sm text-gray-400">
+                <a href="https://github.com/{{ owner }}/{{ repo }}/pull/{{ pr_number }}" target="_blank" 
+                   class="text-mongo-green hover:text-white transition-colors flex items-center gap-1">
+                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                    </svg>
+                    {{ owner }}/{{ repo }} #{{ pr_number }}
+                </a>
+                <span>by {{ pr_author }}</span>
+            </div>
+        </div>
+        <a href="/dashboard" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors">
+            ← Back to Dashboard
+        </a>
+    </div>
+
+    <!-- Tabs -->
+    <div class="mb-6 border-b border-gray-700 flex gap-4">
+        <button @click="activeTab = 'comments'" 
+                :class="activeTab === 'comments' ? 'border-b-2 border-mongo-green text-mongo-green' : 'text-gray-400 hover:text-white'"
+                class="px-4 py-2 font-medium transition-colors">
+            Comments ({{ comments|length }})
+        </button>
+        <button @click="activeTab = 'changes'" 
+                :class="activeTab === 'changes' ? 'border-b-2 border-mongo-green text-mongo-green' : 'text-gray-400 hover:text-white'"
+                class="px-4 py-2 font-medium transition-colors">
+            Code Changes ({{ diffs|length }})
+        </button>
+        <button @click="activeTab = 'chat'" 
+                :class="activeTab === 'chat' ? 'border-b-2 border-mongo-green text-mongo-green' : 'text-gray-400 hover:text-white'"
+                class="px-4 py-2 font-medium transition-colors">
+            AI Chat
+        </button>
+    </div>
+
+    <!-- Comments Tab -->
+    <div x-show="activeTab === 'comments'" class="space-y-4">
+        {% if comments %}
+            {% for item in comments %}
+            <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-4 hover:border-gray-600 transition-colors">
+                <div class="flex items-start justify-between mb-3">
+                    <div class="flex-1">
+                        <div class="flex items-center gap-2 mb-1">
+                            {% if item.file_path %}
+                            <span class="text-sm font-semibold text-blue-400">{{ item.file_path }}</span>
+                            {% endif %}
+                            {% if item.status %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                                {% if item.status == 'RESOLVED' or item.status == 'APPROVED' %}bg-green-500/20 text-green-400 border border-green-500/30
+                                {% elif item.status == 'ACTIVE' %}bg-yellow-500/20 text-yellow-400 border border-yellow-500/30
+                                {% elif item.status == 'UNRESOLVED' %}bg-red-500/20 text-red-400 border border-red-500/30
+                                {% else %}bg-gray-500/20 text-gray-400 border border-gray-500/30{% endif %}">
+                                {{ item.status }}
+                            </span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                
+                {% if item.code_snippet %}
+                <div class="mb-3 bg-gray-900 rounded p-3 border border-gray-700 overflow-x-auto">
+                    <pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap">{{ item.code_snippet }}</pre>
+                </div>
+                {% endif %}
+                
+                {% if item.conversation %}
+                <div class="space-y-3">
+                    {% for msg in item.conversation %}
+                    <div class="bg-gray-900/50 rounded-lg p-3 border border-gray-700/50">
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-sm font-semibold text-white">{{ msg.author or 'Unknown' }}</span>
+                            {% if msg.timestamp %}
+                            <span class="text-xs text-gray-500">{{ msg.timestamp[:10] }}</span>
+                            {% endif %}
+                        </div>
+                        <div class="text-sm text-gray-300 whitespace-pre-wrap">{{ msg.text }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="text-center py-12 text-gray-500">
+                <p>No comments found for this PR</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- Code Changes Tab -->
+    <div x-show="activeTab === 'changes'" class="space-y-4">
+        {% if diffs %}
+            {% for diff in diffs %}
+            <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-semibold text-blue-400">{{ diff.filename }}</span>
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                            {% if diff.status == 'added' %}bg-green-500/20 text-green-400 border border-green-500/30
+                            {% elif diff.status == 'removed' %}bg-red-500/20 text-red-400 border border-red-500/30
+                            {% else %}bg-yellow-500/20 text-yellow-400 border border-yellow-500/30{% endif %}">
+                            {{ diff.status }}
+                        </span>
+                    </div>
+                    <div class="text-xs text-gray-400">
+                        <span class="text-green-400">+{{ diff.additions }}</span>
+                        <span class="text-red-400"> -{{ diff.deletions }}</span>
+                        <span class="text-gray-500"> ({{ diff.changes }} changes)</span>
+                    </div>
+                </div>
+                
+                {% if diff.patch %}
+                <div class="bg-gray-900 rounded p-3 border border-gray-700 overflow-x-auto">
+                    <pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap">{{ diff.patch }}</pre>
+                </div>
+                {% else %}
+                <p class="text-sm text-gray-500 italic">No diff content available (file may be too large or binary)</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="text-center py-12 text-gray-500">
+                <p>No code changes found</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- AI Chat Tab -->
+    <div x-show="activeTab === 'chat'" class="flex flex-col h-[calc(100vh-300px)]">
+        <!-- Chat Messages -->
+        <div class="flex-1 overflow-y-auto mb-4 space-y-4 p-4 bg-gray-900/30 rounded-lg">
+            <template x-if="chatMessages.length === 0">
+                <div class="text-center py-12 text-gray-500">
+                    <p class="mb-2">Start a conversation about this PR</p>
+                    <p class="text-sm text-gray-600">Ask questions about the code changes, comments, or get suggestions</p>
+                </div>
+            </template>
+            
+            <template x-for="(msg, index) in chatMessages" :key="index">
+                <div :class="msg.role === 'user' ? 'ml-auto max-w-3xl' : 'mr-auto max-w-3xl'">
+                    <div :class="msg.role === 'user' ? 'bg-mongo-green/20 border border-mongo-green/50 text-white' : 'bg-gray-800/60 border border-gray-700 text-gray-300'"
+                         class="rounded-lg p-4">
+                        <div class="text-sm font-semibold mb-2" x-text="msg.role === 'user' ? 'You' : 'AI Assistant'"></div>
+                        <div class="whitespace-pre-wrap" x-html="msg.content.replace(/\n/g, '&lt;br&gt;')"></div>
+                    </div>
+                </div>
+            </template>
+            
+            <template x-if="chatLoading">
+                <div class="mr-auto max-w-3xl">
+                    <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-4">
+                        <div class="flex items-center gap-2 text-gray-400">
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></div>
+                            <span>Thinking...</span>
+                        </div>
+                    </div>
+                </div>
+            </template>
+        </div>
+        
+        <!-- Chat Input -->
+        <div class="flex gap-2">
+            <textarea x-model="chatInput" 
+                      @keydown.enter.prevent="sendMessage()"
+                      @keydown.enter.shift.prevent="chatInput += '\n'"
+                      placeholder="Ask about the PR, code changes, or comments..."
+                      class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-mongo-green resize-none"
+                      rows="3"></textarea>
+            <button @click="sendMessage()" 
+                    :disabled="chatLoading || !chatInput.trim()"
+                    class="px-6 py-3 bg-mongo-green/20 hover:bg-mongo-green/30 text-mongo-green border border-mongo-green/50 rounded-lg font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                Send
+            </button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+

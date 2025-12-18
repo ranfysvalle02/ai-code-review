@@ -1,91 +1,171 @@
 {% extends "base.html" %}
 
 {% block content %}
-    <div class="max-w-3xl mx-auto">
+    <div class="max-w-4xl mx-auto">
         <div class="flex items-center justify-between mb-8">
-            <h2 class="text-2xl font-bold text-white tracking-tight">Search GitHub Repositories</h2>
+            <h2 class="text-2xl font-bold text-white tracking-tight">Ecosystem Discovery</h2>
             <a href="/" class="text-sm text-gray-400 hover:text-mongo-green transition-colors">
-                &larr; Back to Home
+                &larr; Back to Dashboard
             </a>
         </div>
 
-        <form action="/search" method="post" class="space-y-6 mb-10 bg-gray-900/50 p-6 rounded-xl border border-gray-700">
+        <!-- Search Tabs -->
+        <div class="flex border-b border-gray-700 mb-6" x-data="{ tab: '{{ tab if tab else 'repos' }}' }">
+            <button @click="tab = 'repos'; window.location.href='/search'" 
+                class="px-6 py-3 font-medium text-sm transition-colors border-b-2"
+                :class="{ 'text-mongo-green border-mongo-green': '{{ tab }}' === 'repos' || !'{{ tab }}', 'text-gray-400 border-transparent hover:text-white': '{{ tab }}' !== 'repos' && '{{ tab }}' }">
+                Search Repositories
+            </button>
+            <button @click="tab = 'issues'" 
+                 class="px-6 py-3 font-medium text-sm transition-colors border-b-2"
+                 :class="{ 'text-mongo-green border-mongo-green': '{{ tab }}' === 'issues', 'text-gray-400 border-transparent hover:text-white': '{{ tab }}' !== 'issues' }">
+                Search Issues (Opportunities)
+            </button>
+        </div>
+
+        <!-- REPO SEARCH FORM -->
+        {% if not tab or tab == 'repos' %}
+        <form action="/search" method="post" class="space-y-6 mb-10 bg-gray-900/50 p-6 rounded-xl border border-gray-700 backdrop-blur-sm">
             <div>
                 <label class="block text-sm font-medium text-mongo-green mb-1 uppercase tracking-wide">Keywords</label>
                 <div class="relative">
                     <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                     </span>
-                    <input type="text" name="query" value="{{ query or '' }}" placeholder="e.g. machine learning, react framework..." class="w-full bg-mongo-dark border border-gray-700 text-white pl-10 p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600" required>
+                    <input type="text" name="query" value="{{ query or '' }}" placeholder="e.g. mongodb connector, vector search..." class="w-full bg-mongo-dark border border-gray-700 text-white pl-10 p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600" required>
                 </div>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-1">Language (Optional)</label>
-                    <input type="text" name="language" value="{{ language or '' }}" placeholder="e.g. python, typescript" class="w-full bg-mongo-dark border border-gray-700 text-white p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600">
+                    <label class="block text-sm font-medium text-gray-400 mb-1">Language</label>
+                    <input type="text" name="language" value="{{ language or '' }}" placeholder="e.g. python" class="w-full bg-mongo-dark border border-gray-700 text-white p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-1">Min Stars (Optional)</label>
-                    <input type="number" name="min_stars" value="{{ min_stars or '' }}" placeholder="e.g. 1000" class="w-full bg-mongo-dark border border-gray-700 text-white p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600">
+                    <label class="block text-sm font-medium text-gray-400 mb-1">Min Stars</label>
+                    <input type="number" name="min_stars" value="{{ min_stars or '' }}" placeholder="e.g. 100" class="w-full bg-mongo-dark border border-gray-700 text-white p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600">
                 </div>
             </div>
 
-            <button type="submit" class="w-full bg-white text-mongo-slate font-bold py-3 px-6 rounded-lg hover:bg-mongo-green transition-colors shadow-lg">
-                Search Repositories
+            <button type="submit" class="w-full bg-white text-mongo-slate font-bold py-3 px-6 rounded-lg hover:bg-mongo-green transition-colors shadow-lg flex justify-center items-center gap-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                Find Repos
             </button>
         </form>
+        {% endif %}
 
-        {% if results is defined %}
-            {% if not results %}
-                <div class="text-center py-12 bg-gray-900/30 rounded-xl border border-gray-800">
-                    <p class="text-gray-500 text-lg">No repositories found matching your criteria.</p>
+        <!-- ISSUE SEARCH FORM -->
+        {% if tab == 'issues' %}
+        <form action="/search/issues" method="post" class="space-y-6 mb-10 bg-gray-900/50 p-6 rounded-xl border border-gray-700 backdrop-blur-sm">
+            <div>
+                <label class="block text-sm font-medium text-mongo-green mb-1 uppercase tracking-wide">Issue Keywords</label>
+                <div class="relative">
+                    <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
+                    </span>
+                    <input type="text" name="query" value="{{ query or 'is:issue is:open label:&quot;help wanted&quot;' }}" placeholder="e.g. is:issue is:open label:&quot;good first issue&quot; mongodb" class="w-full bg-mongo-dark border border-gray-700 text-white pl-10 p-3 rounded-lg focus:ring-2 focus:ring-mongo-green focus:border-transparent transition-all placeholder-gray-600" required>
+                </div>
+                <p class="text-xs text-gray-500 mt-2">Pro tip: Use GitHub search syntax like <code>label:"help wanted"</code> or <code>language:python</code>.</p>
+            </div>
+
+            <button type="submit" class="w-full bg-mongo-green text-mongo-slate font-bold py-3 px-6 rounded-lg hover:bg-green-400 transition-colors shadow-lg flex justify-center items-center gap-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                Find Opportunities
+            </button>
+        </form>
+        {% endif %}
+
+
+        <!-- RESULTS AREA -->
+        
+        <!-- Repo Results -->
+        {% if results is defined and results %}
+            <div class="space-y-4">
+                {% for repo in results %}
+                <div class="bg-gray-800 rounded-xl p-5 border border-gray-700 hover:border-mongo-green transition-colors group">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <h3 class="text-lg font-bold text-mongo-green group-hover:underline">
+                                <a href="#" onclick="selectRepo('{{ repo.owner.login }}', '{{ repo.name }}'); return false;">
+                                    {{ repo.owner.login }} / {{ repo.name }}
+                                </a>
+                            </h3>
+                            <p class="text-gray-400 text-sm mt-1 line-clamp-2">{{ repo.description or 'No description provided.' }}</p>
+                        </div>
+                        <div class="flex items-center gap-1 text-yellow-500 bg-yellow-500/10 px-2 py-1 rounded text-xs font-mono">
+                            {{ repo.stargazerCount }} ★
+                        </div>
+                    </div>
+                    <div class="mt-4 flex items-center gap-4 text-xs text-gray-500 font-mono">
+                        {% if repo.primaryLanguage %}
+                        <span class="flex items-center gap-1">
+                            <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+                            {{ repo.primaryLanguage.name }}
+                        </span>
+                        {% endif %}
+                        <span>Updated {{ repo.updatedAt[:10] }}</span>
+                        
+                        <form action="/repos" method="post" class="ml-auto">
+                            <input type="hidden" name="owner" value="{{ repo.owner.login }}">
+                            <input type="hidden" name="repo" value="{{ repo.name }}">
+                            <button type="submit" class="text-indigo-400 hover:text-white transition-colors font-bold uppercase tracking-wider flex items-center gap-1">
+                                Analyze &rarr;
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+
+        <!-- Issue Results -->
+        {% if issue_results is defined %}
+            {% if not issue_results %}
+                 <div class="text-center py-12 bg-gray-900/30 rounded-xl border border-gray-800">
+                    <p class="text-gray-500 text-lg">No open issues found matching your criteria.</p>
                 </div>
             {% else %}
                 <div class="space-y-4">
-                    {% for repo in results %}
-                    <div class="bg-gray-800 rounded-xl p-5 border border-gray-700 hover:border-mongo-green transition-colors group">
-                        <div class="flex justify-between items-start">
-                            <div>
-                                <h3 class="text-lg font-bold text-mongo-green group-hover:underline">
-                                    <a href="#" onclick="selectRepo('{{ repo.owner.login }}', '{{ repo.name }}'); return false;">
-                                        {{ repo.owner.login }} / {{ repo.name }}
-                                    </a>
-                                </h3>
-                                <p class="text-gray-400 text-sm mt-1 line-clamp-2">{{ repo.description or 'No description provided.' }}</p>
+                    {% for issue in issue_results %}
+                    <div class="bg-gray-800 rounded-xl p-5 border border-gray-700 hover:border-green-400 transition-colors group">
+                        <div class="flex justify-between items-start gap-4">
+                            <div class="flex-1">
+                                <div class="flex items-center gap-2 mb-1">
+                                    <span class="text-green-400">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                    </span>
+                                    <h3 class="text-lg font-bold text-white group-hover:text-green-400 transition-colors">
+                                        <a href="{{ issue.url }}" target="_blank">
+                                            {{ issue.title }}
+                                        </a>
+                                    </h3>
+                                    <span class="text-xs text-gray-500">#{{ issue.number }}</span>
+                                </div>
+                                <p class="text-sm text-gray-400 mb-2">
+                                    in <span class="text-mongo-green font-semibold">{{ issue.repository.owner.login }}/{{ issue.repository.name }}</span>
+                                </p>
+                                <p class="text-gray-500 text-sm line-clamp-2 italic">
+                                    {{ issue.body[:200] }}...
+                                </p>
                             </div>
-                            <div class="flex items-center gap-1 text-yellow-500 bg-yellow-500/10 px-2 py-1 rounded text-xs font-mono">
-                                <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"></path></svg>
-                                {{ repo.stargazerCount }}
-                            </div>
-                        </div>
-                        <div class="mt-4 flex items-center gap-4 text-xs text-gray-500 font-mono">
-                            {% if repo.primaryLanguage %}
-                            <span class="flex items-center gap-1">
-                                <span class="w-2 h-2 rounded-full bg-blue-400"></span>
-                                {{ repo.primaryLanguage.name }}
-                            </span>
-                            {% endif %}
-                            <span>Updated {{ repo.updatedAt[:10] }}</span>
                             
-                            <form action="/repos" method="post" class="ml-auto">
-                                <input type="hidden" name="owner" value="{{ repo.owner.login }}">
-                                <input type="hidden" name="repo" value="{{ repo.name }}">
-                                <button type="submit" class="text-indigo-400 hover:text-white transition-colors font-bold uppercase tracking-wider flex items-center gap-1">
-                                    Analyze &rarr;
-                                </button>
-                            </form>
+                            <div class="flex flex-col items-end gap-2">
+                                <span class="text-xs text-gray-600 whitespace-nowrap">{{ issue.createdAt[:10] }}</span>
+                                <a href="{{ issue.url }}" target="_blank" class="px-3 py-1 bg-green-600/20 text-green-400 border border-green-600/50 rounded-lg text-xs font-bold hover:bg-green-600 hover:text-white transition-all">
+                                    OPEN PR
+                                </a>
+                            </div>
                         </div>
                     </div>
                     {% endfor %}
                 </div>
             {% endif %}
         {% endif %}
+
     </div>
 
     <script>
         function selectRepo(owner, repo) {
-            // Create a form dynamically to submit to /repos
             const form = document.createElement('form');
             form.method = 'POST';
             form.action = '/repos';
@@ -107,4 +187,3 @@
         }
     </script>
 {% endblock %}
-

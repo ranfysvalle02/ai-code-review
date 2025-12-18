@@ -10,11 +10,11 @@
         </div>
         
         <div class="flex items-center gap-4">
-            <form action="/repos/{{ owner }}/{{ repo }}" method="get" class="flex gap-2">
+            <form action="/repos/{{ owner }}/{{ repo }}/prs" method="get" class="flex gap-2">
                 <input type="text" name="search" value="{{ search_term or '' }}" placeholder="Search PRs..." class="bg-mongo-dark border border-gray-700 text-white rounded-md px-3 py-1.5 text-sm focus:ring-mongo-green focus:border-transparent placeholder-gray-600">
                 <button type="submit" class="bg-gray-700 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-gray-600 transition-colors">Search</button>
                 {% if search_term %}
-                <a href="/repos/{{ owner }}/{{ repo }}" class="text-sm text-gray-500 hover:text-red-400 flex items-center">✕ Clear</a>
+                <a href="/repos/{{ owner }}/{{ repo }}/prs" class="text-sm text-gray-500 hover:text-red-400 flex items-center">✕ Clear</a>
                 {% endif %}
             </form>
             <a href="/" class="text-sm text-gray-500 hover:text-mongo-green font-medium">New Repo</a>
@@ -28,7 +28,7 @@
     {% endif %}
 
     <!-- Tabs -->
-    <div class="mb-6 border-b border-gray-700">
+    <div class="mb-6 border-b border-gray-700 flex justify-between items-end">
         <nav class="-mb-px flex space-x-8" aria-label="Tabs">
             <button onclick="filterPRs('ALL')" id="tab-ALL" class="tab-btn border-mongo-green text-mongo-green whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors">
                 All
@@ -43,6 +43,12 @@
                 Merged
             </button>
         </nav>
+        
+        <div class="pb-3">
+            <a href="?sort_by=threads_desc" class="text-xs font-bold uppercase tracking-wide {{ 'text-mongo-green' if current_sort == 'threads_desc' else 'text-gray-500 hover:text-white' }}">
+                Sort by Activity
+            </a>
+        </div>
     </div>
 
     <div class="space-y-2" id="pr-list">
@@ -59,6 +65,14 @@
                     <span class="ml-2">by {{ pr['author']['login'] }} on {{ pr['createdAt'][:10] }}</span> <span class="mx-1 text-gray-700">|</span> <span class="font-mono text-xs text-gray-400">{{ pr['headRefName'] }}</span>
                 </p>
             </div>
+            {% if pr.reviewThreads %}
+            <div class="flex flex-col items-end text-xs text-gray-500">
+                <span class="flex items-center gap-1 {{ 'text-mongo-green font-bold' if pr.reviewThreads.totalCount > 0 }}">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586m0 0L11 14h4a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2v4l.586-.586z"></path></svg>
+                    {{ pr.reviewThreads.totalCount }} threads
+                </span>
+            </div>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -67,14 +81,14 @@
     <div class="mt-6 flex justify-between items-center border-t border-gray-700 pt-4">
         <div>
             {% if current_cursor %}
-            <a href="/repos/{{ owner }}/{{ repo }}{{ '?search=' + search_term if search_term else '' }}" class="text-mongo-green hover:text-white text-sm font-medium">
+            <a href="/repos/{{ owner }}/{{ repo }}/prs{{ '?search=' + search_term if search_term else '' }}" class="text-mongo-green hover:text-white text-sm font-medium">
                 ← Start Over
             </a>
             {% endif %}
         </div>
         
         {% if page_info and page_info.hasNextPage %}
-        <a href="/repos/{{ owner }}/{{ repo }}?cursor={{ page_info.endCursor }}{{ '&search=' + search_term if search_term else '' }}" class="bg-gray-800 border border-gray-600 text-white hover:bg-gray-700 px-4 py-2 rounded text-sm font-medium shadow-sm transition-colors">
+        <a href="/repos/{{ owner }}/{{ repo }}/prs?cursor={{ page_info.endCursor }}{{ '&search=' + search_term if search_term else '' }}" class="bg-gray-800 border border-gray-600 text-white hover:bg-gray-700 px-4 py-2 rounded text-sm font-medium shadow-sm transition-colors">
             Load More (Next 100) →
         </a>
         {% endif %}

@@ -1,0 +1,200 @@
+---
+description: Comprehensive rules and best practices for MongoDB projects, focusing on Driver Selection, Atlas Search/Vector Indexing, and Aggregation Pipeline optimization.
+globs: **/*.py, **/*.js, **/*.ts, **/*.go, **/*.java
+---
+
+# MongoDB & Atlas Search Implementation Guidelines
+
+## 1. Architecture & Driver Selection
+
+**Context:** The choice of database driver must strictly match the application's I/O architecture. Mixing blocking and non-blocking patterns causes severe performance degradation or deadlocks.
+
+* **Rule (Async Contexts):** When working in asynchronous frameworks (e.g., FastAPI, Node.js, Go/Goroutines), you **MUST** use asynchronous drivers (e.g., `motor`, native Node driver).
+    * *Constraint:* Never use synchronous/blocking driver calls inside an async function. This blocks the main event loop.
+* **Rule (Sync Contexts):** In synchronous scripts, CLI tools, or legacy WSGI apps, prefer standard synchronous drivers (e.g., `pymongo`) for simplicity.
+* **Pattern:** Wrap database utilities in the native paradigm of the framework.
+
+```python
+# ✅ Correct: Async usage (FastAPI/Tornado)
+async def get_user_async(collection, user_id):
+    return await collection.find_one({"user_id": user_id})
+
+# ✅ Correct: Sync usage (CLI/Scripts)
+def get_user_sync(collection, user_id):
+    return collection.find_one({"user_id": user_id})
+````
+
+## 2\. Robust Index Management (Atlas Search & Vector)
+
+**Context:** Unlike standard B-tree indexes, Atlas Search (Vector/Lucene) indexes are built asynchronously on the cloud side. The API command returns *immediately*, but the index is not ready for query execution until the build finishes.
+
+### A. Programmatic Definition (SearchIndexModel)
+
+  * **Rule:** Define index configurations programmatically using typed models (e.g., `pymongo.operations.SearchIndexModel`) rather than raw dictionaries or manual UI creation. This ensures infrastructure-as-code.
+  * **Rule:** Explicitly specify the index `type` (`vectorSearch` or `search`) and `name`.
+  * **Best Practice:** For Vector Search, always index "filter" fields to allow for efficient pre-filtering.
+
+<!-- end list -->
+
+```python
+from pymongo.operations import SearchIndexModel
+
+# Example: Vector Search Index Definition
+vector_model = SearchIndexModel(
+    definition={
+        "fields": [
+            {
+                "type": "vector",
+                "path": "embedding",
+                "numDimensions": 1536,
+                "similarity": "cosine"
+            },
+            # Optimize: Index fields used in filters!
+            {"type": "filter", "path": "category"},
+            {"type": "filter", "path": "user_id"}
+        ]
+    },
+    name="vector_index",
+    type="vectorSearch"
+)
+
+# Example: Full-Text Search Index Definition
+text_model = SearchIndexModel(
+    definition={
+        "mappings": {
+            "dynamic": False,
+            "fields": {
+                "title": {"type": "string"},
+                "description": {"type": "string"}
+            }
+        }
+    },
+    name="text_search_index",
+    type="search"
+)
+```
+
+### B. The "Wait for Ready" Pattern
+
+  * **Rule:** Code that depends on an index immediately after creation (e.g., app startup, integration tests) **MUST** implement a polling mechanism.
+  * **Logic:**
+    1.  Submit `create_search_index`.
+    2.  Poll `$listSearchIndexes` periodically.
+    3.  **Crucial Check:** Wait until `queryable == true` AND `status == "READY"`.
+    4.  Timeout gracefully if it takes too long.
+
+<!-- end list -->
+
+```python
+import asyncio
+import time
+
+# Implementation Logic (Generic Async)
+async def wait_for_search_index(collection, index_name: str, timeout: int = 300):
+    """
+    Polls the collection until the specified search index is queryable.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        # Fetch status via aggregation
+        cursor = collection.aggregate([{"$listSearchIndexes": {"name": index_name}}])
+        
+        # Cursor might be empty initially if index creation just started
+        # We use a flag to track if we found the index in the list
+        found = False
+        async for index_info in cursor:
+            found = True
+            # Check both status and queryable flag
+            if index_info.get("queryable") is True and index_info.get("status") == "READY":
+                return True
+            elif index_info.get("status") == "FAILED":
+                raise Exception(f"Index build failed: {index_info}")
+        
+        # Wait before retrying
+        await asyncio.sleep(5)
+    
+    raise TimeoutError(f"Index {index_name} not ready within {timeout} seconds.")
+```
+
+### C. Idempotency & Creation Logic
+
+  * **Rule:** Index creation scripts must be **idempotent**.
+  * **Rule:** Handle `OperationFailure` specifically for race conditions (e.g., "IndexAlreadyExists").
+  * **Pattern:** The "Check-Compare-Act" loop.
+
+<!-- end list -->
+
+```python
+from pymongo.errors import OperationFailure
+
+async def ensure_index(collection, model):
+    try:
+        # 1. Attempt creation
+        await collection.create_search_index(model=model)
+        print(f"Creation initiated for index: {model.name}")
+    except OperationFailure as e:
+        # 2. Handle benign race conditions
+        if "IndexAlreadyExists" in str(e) or "DuplicateIndexName" in str(e):
+             # Optional: Check if definition changed and update if necessary
+             # await collection.update_search_index(name=model.name, definition=model.definition)
+             print(f"Index {model.name} already exists. Proceeding.")
+        else:
+            raise e
+    
+    # 3. Always wait for it to be ready before proceeding
+    print(f"Waiting for index {model.name} to be queryable...")
+    await wait_for_search_index(collection, model.name)
+    print(f"Index {model.name} is ready.")
+```
+
+## 3\. Aggregation Pipeline Optimization
+
+**Context:** The order of operations in MongoDB aggregation pipelines significantly impacts performance, especially with Vector Search.
+
+  * **Rule (Ordering):** Specialized operators like `$vectorSearch`, `$search`, and `$geoNear` **MUST** be the very first stage in the pipeline.
+  * **Rule (Pre-filtering):** Do not use a separate `$match` stage immediately after `$vectorSearch` to filter results.
+      * *Why:* This forces the vector engine to scan irrelevant vectors (ANN search), only to discard them later.
+      * *Fix:* Use the dedicated `filter` property *inside* the `$vectorSearch` definition.
+
+<!-- end list -->
+
+```javascript
+// ✅ Correct: Filter INSIDE vectorSearch
+{
+  "$vectorSearch": {
+    "index": "vector_index",
+    "path": "embedding",
+    "queryVector": [...],
+    "filter": { "category": "books" } // Efficient pre-filtering
+  }
+}
+
+// ⚠️ Incorrect: Match AFTER vectorSearch
+// Scans "movies" vectors needlessly, then throws them away
+[
+  { "$vectorSearch": { ... } },
+  { "$match": { "category": "books" } }
+]
+```
+
+## 4\. General Implementation Guidelines
+
+### Error Handling
+
+  * **Rule:** Wrap administrative commands (create/drop/update) in `try/except` blocks to handle benign errors.
+  * **Targeted Exceptions:**
+      * `NamespaceNotFound`: Attempting to drop an index that doesn't exist.
+      * `CollectionInvalid`: Attempting to create a collection that already exists.
+      * `OperationFailure`: General Atlas errors (check error code/message).
+
+### Scoping & Wrapping
+
+  * **Pattern:** Use a wrapper or repository pattern to inject standard filters (e.g., `tenant_id`, `experiment_id`) automatically.
+  * **Rule:** If using a wrapper, ensure it exposes the underlying driver objects (e.g., `database` or `collection`) for advanced operations like index management that should not be scoped.
+
+## 5\. Anti-Patterns to Avoid
+
+1.  **Fire-and-Forget Indexing:** Calling `create_search_index` and immediately running a query.
+2.  **Assuming "READY" = Queryable:** In rare cases (updates/swaps), an index may report `READY` while the old version is still active. Always check `queryable: true`.
+3.  **Blocking the Loop:** Using `pymongo` (sync) methods inside `async def` (Python) or `await` (Node) blocks.
+4.  **Silent Failures:** Swallowing all exceptions during index creation. Always log the failure or raise a visible error.

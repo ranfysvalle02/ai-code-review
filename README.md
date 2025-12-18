@@ -25,6 +25,12 @@ The constraint isn't keystrokes; it's clarity.
 - **Structured Reasoning**: Uses OpenAI Structured Outputs (Pydantic) to force the AI to "think" step-by-step, analyze the debate, and check for race conditions or architectural mismatches.
 - **Interactive Dashboard**: A FastAPI + HTMX web interface to browse PRs, select threads, and stream analysis results in real-time.
 - **Smart Context**: Automatically suggests which files and documentation to index based on the PR's modified files.
+- **Multiple Analysis Modes**: 
+  - **Thread Analysis**: Analyze specific PR discussion threads with parallel AI agents
+  - **General Review**: Comprehensive PR review with specialized focus areas (Security, Performance, Architecture, Code Quality, Testing)
+- **Personal PR Dashboard**: Track all PRs you're involved in across repositories with advanced filtering
+- **Repository Explorer**: Browse trending repositories, search for issues, and navigate PRs
+- **AI Chat Interface**: Ask follow-up questions about PR reviews and get contextual answers
 
 ## Prerequisites
 
@@ -44,11 +50,40 @@ The constraint isn't keystrokes; it's clarity.
    Open your browser and navigate to `http://localhost:8000`.
 
 3. **Workflow:**
-   - **Search:** Enter a GitHub repository owner and name (e.g., `fastapi/fastapi`).
-   - **Select PR:** Choose a Pull Request from the list.
-   - **Context:** The tool will suggest relevant files to index. You can adjust this selection.
-   - **Analyze:** Select specific discussion threads you want to resolve and click "Start Analysis".
-   - **Review:** Watch as the AI agents analyze each thread in parallel and generate a detailed report with proposed fixes.
+
+   The application provides several entry points and workflows:
+
+   **Option A: Browse Trending Repositories**
+   - Start at the home page (`/`) which shows trending repositories (defaults to MongoDB ecosystem)
+   - Filter by language, minimum stars, and sort options
+   - Click on any repository to access its dashboard
+
+   **Option B: Direct Repository Access**
+   - Use the search form on the home page to directly navigate to a specific repository
+   - Enter owner and repository name (e.g., `mongodb/mongo-go-driver`)
+   - Access the repository dashboard with PR scanning, issue search, and analysis tools
+
+   **Option C: Personal PR Dashboard**
+   - Navigate to `/dashboard` to see all Pull Requests you're involved in
+   - Filter by state (Open, Closed, Merged), repository, role (author, reviewer, contributor), and date range
+   - View PR previews with comments and metadata
+   - Click any PR to dive into detailed analysis
+
+   **Option D: Search Repositories and Issues**
+   - Use `/search` to search for repositories or issues across GitHub
+   - Apply filters for language, stars, and other criteria
+   - Find "Help Wanted" issues in specific repositories
+
+   **Analysis Workflow (from any PR):**
+   1. **Select a PR:** From the repository PR list or your personal dashboard
+   2. **View PR Details:** See all review threads, comments, and code changes
+   3. **Choose Analysis Type:**
+      - **Thread Analysis:** Select specific discussion threads to analyze and resolve
+      - **General Review:** Get a comprehensive AI review of all modified files with specialized focus areas (Security, Performance, Architecture, etc.)
+   4. **Configure Context:** The tool suggests relevant files to index based on PR changes. Adjust the selection as needed.
+   5. **Start Analysis:** Watch as AI agents analyze in parallel and stream results in real-time
+   6. **Review Results:** Get detailed reports with proposed fixes, code suggestions, and actionable recommendations
+   7. **Follow-up Questions:** For general reviews, ask follow-up questions about specific findings
 
 
 -----
@@ -200,12 +235,17 @@ For those interested in the implementation details, here is the tech stack that 
 
 - `main.py`: FastAPI application entry point and route definitions.
 - `services.py`: Core business logic including:
-  - `GitHubFetcher`: GraphQL client for GitHub API.
-  - `git_sandbox`: Async context manager for temporary repo cloning.
-  - `VectorStore`: Voyage AI integration for semantic indexing.
-  - `AIReviewer`: GPT-4o integration with structured outputs.
-- `templates/`: HTML templates for the UI.
-
-## Legacy CLI
-
-A legacy CLI version is available in `cli_legacy.py`, though the web interface is the recommended way to use the tool.
+  - `GitHubFetcher`: GraphQL client for GitHub API with retry logic and comprehensive PR/issue search.
+  - `git_sandbox`: Async context manager for temporary repo cloning and PR branch checkout.
+  - `VectorStore`: Voyage AI integration for semantic indexing of codebases.
+  - `AIReviewer`: GPT-4o integration with structured outputs for thread analysis and general PR reviews.
+- `templates/`: HTML templates for the web interface:
+  - `index.html`: Home page with trending repositories
+  - `dashboard.html`: Personal PR dashboard with filtering and search
+  - `repo_dashboard.html`: Repository overview and navigation
+  - `prs.html`: List of PRs for a repository
+  - `pr_detail.html`: PR detail view with threads
+  - `pr_comments.html`: PR comments page with AI chat interface
+  - `analysis_dashboard.html`: Real-time analysis results streaming
+  - `repo_search.html`: Repository and issue search interface
+  - `partials/`: Reusable template components for analysis results

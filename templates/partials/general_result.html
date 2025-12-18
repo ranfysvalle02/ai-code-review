@@ -1,0 +1,471 @@
+<div class="bg-gray-800 rounded-2xl shadow-xl border border-gray-700 overflow-hidden" x-data="{ activeTab: 'summary' }">
+    <!-- Result Header -->
+    <div class="px-6 py-4 bg-gray-900/80 border-b border-gray-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div class="flex items-center gap-3">
+            <div class="p-2 bg-mongo-green/10 rounded-lg">
+                <svg class="w-6 h-6 text-mongo-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            </div>
+            <div>
+                <span class="block text-lg font-bold text-white tracking-tight">General PR Review</span>
+                <span class="text-xs text-gray-400">Comprehensive AI Analysis</span>
+            </div>
+        </div>
+        <div class="flex items-center gap-3 bg-gray-800/50 px-4 py-2 rounded-lg border border-gray-700/50">
+            <span class="text-xs font-medium text-gray-400 uppercase tracking-wide">Score</span>
+            <span class="text-xl font-bold {{ 'text-green-400' if res.ai_analysis.code_quality_score >= 8 else ('text-yellow-400' if res.ai_analysis.code_quality_score >= 5 else 'text-red-400') }}">
+                {{ res.ai_analysis.code_quality_score }}<span class="text-gray-500 text-sm">/10</span>
+            </span>
+        </div>
+    </div>
+    
+    <!-- Tab Navigation -->
+    <div class="flex gap-1 border-b border-gray-700 bg-gray-900/50 px-4 overflow-x-auto">
+        <button @click="activeTab = 'summary'" 
+                :class="activeTab === 'summary' ? 'border-b-2 border-mongo-green text-white' : 'text-gray-400 hover:text-gray-300'"
+                class="px-4 py-2.5 text-xs font-semibold transition-colors focus:outline-none whitespace-nowrap">
+            Summary
+        </button>
+        {% if res.specialized_analyses %}
+        <button @click="activeTab = 'analyses'" 
+                :class="activeTab === 'analyses' ? 'border-b-2 border-purple-400 text-white' : 'text-gray-400 hover:text-gray-300'"
+                class="px-4 py-2.5 text-xs font-semibold transition-colors focus:outline-none whitespace-nowrap">
+            Individual Analyses
+        </button>
+        {% endif %}
+        <button @click="activeTab = 'details'" 
+                :class="activeTab === 'details' ? 'border-b-2 border-mongo-green text-white' : 'text-gray-400 hover:text-gray-300'"
+                class="px-4 py-2.5 text-xs font-semibold transition-colors focus:outline-none whitespace-nowrap">
+            Detailed Analysis
+        </button>
+        {% if res.ai_analysis.file_summaries %}
+        <button @click="activeTab = 'files'" 
+                :class="activeTab === 'files' ? 'border-b-2 border-blue-400 text-white' : 'text-gray-400 hover:text-gray-300'"
+                class="px-4 py-2.5 text-xs font-semibold transition-colors focus:outline-none whitespace-nowrap">
+            Files ({{ res.ai_analysis.file_summaries|length }})
+        </button>
+        {% endif %}
+        <button @click="activeTab = 'context'" 
+                :class="activeTab === 'context' ? 'border-b-2 border-gray-400 text-white' : 'text-gray-400 hover:text-gray-300'"
+                class="px-4 py-2.5 text-xs font-semibold transition-colors focus:outline-none whitespace-nowrap">
+            Context
+        </button>
+    </div>
+    
+    <div class="p-5">
+        <!-- Summary Tab -->
+        <div x-show="activeTab === 'summary'" class="space-y-4">
+            <!-- Executive Summary -->
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-4">
+                <h4 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Executive Summary</h4>
+                <p class="text-sm text-gray-200 leading-relaxed">{{ res.ai_analysis.summary }}</p>
+            </div>
+
+            <!-- Quick Stats Grid -->
+            <div class="grid grid-cols-2 gap-3">
+                <!-- Key Issues -->
+                <div class="bg-red-500/5 rounded-lg border border-red-500/20 p-3">
+                    <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                        <h5 class="text-xs font-bold text-red-400 uppercase">Key Issues</h5>
+                    </div>
+                    <div class="text-2xl font-bold text-red-400">{{ res.ai_analysis.key_issues|length }}</div>
+                    {% if res.ai_analysis.key_issues %}
+                    <ul class="mt-2 space-y-1 max-h-32 overflow-y-auto">
+                        {% for issue in res.ai_analysis.key_issues[:3] %}
+                        <li class="text-xs text-red-300 line-clamp-2">• {{ issue }}</li>
+                        {% endfor %}
+                        {% if res.ai_analysis.key_issues|length > 3 %}
+                        <li class="text-xs text-gray-500">+{{ res.ai_analysis.key_issues|length - 3 }} more</li>
+                        {% endif %}
+                    </ul>
+                    {% else %}
+                    <p class="text-xs text-gray-500 mt-1">No critical issues</p>
+                    {% endif %}
+                </div>
+
+                <!-- Recommendations -->
+                <div class="bg-blue-500/5 rounded-lg border border-blue-500/20 p-3">
+                    <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        <h5 class="text-xs font-bold text-blue-400 uppercase">Recommendations</h5>
+                    </div>
+                    <div class="text-2xl font-bold text-blue-400">{{ res.ai_analysis.recommendations|length }}</div>
+                    {% if res.ai_analysis.recommendations %}
+                    <ul class="mt-2 space-y-1 max-h-32 overflow-y-auto">
+                        {% for rec in res.ai_analysis.recommendations[:3] %}
+                        <li class="text-xs text-blue-300 line-clamp-2">→ {{ rec }}</li>
+                        {% endfor %}
+                        {% if res.ai_analysis.recommendations|length > 3 %}
+                        <li class="text-xs text-gray-500">+{{ res.ai_analysis.recommendations|length - 3 }} more</li>
+                        {% endif %}
+                    </ul>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Specialized Analyses Overview -->
+            {% if res.specialized_analyses %}
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-3">
+                <h5 class="text-xs font-bold text-purple-400 uppercase mb-3 flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path></svg>
+                    Specialized Analyses
+                </h5>
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {% for spec in res.specialized_analyses %}
+                    <div class="bg-gray-800/50 rounded border border-gray-700/50 p-2 text-center">
+                        <div class="text-xs font-semibold text-white mb-1">{{ spec.focus_area }}</div>
+                        <div class="text-lg font-bold {{ 'text-green-400' if spec.score >= 8 else ('text-yellow-400' if spec.score >= 5 else 'text-red-400') }}">
+                            {{ spec.score }}/10
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <button @click="activeTab = 'analyses'" class="mt-3 w-full text-xs text-purple-400 hover:text-purple-300 font-medium">
+                    View All Analyses →
+                </button>
+            </div>
+            {% endif %}
+
+            <!-- Severity Badge -->
+            <div class="flex justify-center pt-2">
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider border {{ 'bg-red-900/20 text-red-400 border-red-800/50' if res.ai_analysis.overall_severity == 'High' else ('bg-yellow-900/20 text-yellow-400 border-yellow-800/50' if res.ai_analysis.overall_severity == 'Medium' else 'bg-green-900/20 text-green-400 border-green-800/50') }}">
+                    Severity: {{ res.ai_analysis.overall_severity }}
+                </span>
+            </div>
+        </div>
+
+        <!-- Individual Analyses Tab -->
+        {% if res.specialized_analyses %}
+        <div x-show="activeTab === 'analyses'" class="space-y-3">
+            {% for spec in res.specialized_analyses %}
+            <div x-data="{ expanded: false }" class="bg-gray-900/30 rounded-lg border border-gray-700/50 overflow-hidden">
+                <button @click="expanded = !expanded" class="w-full flex items-center justify-between p-3 hover:bg-gray-800/50 transition-colors text-left">
+                    <div class="flex items-center gap-3 flex-1 min-w-0">
+                        <div class="flex-shrink-0 w-8 h-8 rounded-lg {{ 'bg-green-500/10' if spec.score >= 8 else ('bg-yellow-500/10' if spec.score >= 5 else 'bg-red-500/10') }} flex items-center justify-center">
+                            <span class="text-sm font-bold {{ 'text-green-400' if spec.score >= 8 else ('text-yellow-400' if spec.score >= 5 else 'text-red-400') }}">
+                                {{ spec.score }}
+                            </span>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="text-sm font-bold text-white">{{ spec.focus_area }}</div>
+                            <div class="text-xs text-gray-400 line-clamp-1">{{ spec.summary }}</div>
+                        </div>
+                    </div>
+                    <svg class="w-5 h-5 text-gray-400 flex-shrink-0 transform transition-transform" 
+                         :class="expanded ? 'rotate-180' : ''" 
+                         fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                    </svg>
+                </button>
+                <div x-show="expanded" x-collapse class="border-t border-gray-700/50 p-4 space-y-3 bg-gray-800/30">
+                    <div>
+                        <div class="text-xs font-bold text-gray-400 uppercase mb-2">Summary</div>
+                        <p class="text-sm text-gray-300 leading-relaxed">{{ spec.summary }}</p>
+                    </div>
+                    {% if spec.critical_issues %}
+                    <div>
+                        <div class="text-xs font-bold text-red-400 uppercase mb-2">Critical Issues</div>
+                        <ul class="space-y-1.5">
+                            {% for issue in spec.critical_issues %}
+                            <li class="text-xs text-red-300 flex items-start gap-2">
+                                <span class="text-red-500 mt-0.5">•</span>
+                                <span class="flex-1">{{ issue }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    {% if spec.findings %}
+                    <div>
+                        <div class="text-xs font-bold text-gray-400 uppercase mb-2">Key Findings</div>
+                        <ul class="space-y-1.5">
+                            {% for finding in spec.findings %}
+                            <li class="text-xs text-gray-300 flex items-start gap-2">
+                                <span class="text-gray-500 mt-0.5">•</span>
+                                <span class="flex-1">{{ finding }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    {% if spec.recommendations %}
+                    <div>
+                        <div class="text-xs font-bold text-blue-400 uppercase mb-2">Recommendations</div>
+                        <ul class="space-y-1.5">
+                            {% for rec in spec.recommendations %}
+                            <li class="text-xs text-blue-300 flex items-start gap-2">
+                                <span class="text-blue-500 mt-0.5">→</span>
+                                <span class="flex-1">{{ rec }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Detailed Analysis Tab -->
+        <div x-show="activeTab === 'details'" class="space-y-4">
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-4">
+                <h4 class="text-xs font-bold text-mongo-green uppercase tracking-wider mb-3">Detailed Technical Analysis</h4>
+                <div class="prose prose-invert max-w-none text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">
+{{ res.ai_analysis.detailed_analysis }}
+                </div>
+            </div>
+
+            <!-- Full Key Issues -->
+            {% if res.ai_analysis.key_issues %}
+            <div class="bg-red-500/5 rounded-lg border border-red-500/20 p-4">
+                <h5 class="text-xs font-bold text-red-400 uppercase mb-3">All Key Issues</h5>
+                <ul class="space-y-2">
+                    {% for issue in res.ai_analysis.key_issues %}
+                    <li class="text-xs text-red-300 flex items-start gap-2">
+                        <span class="text-red-500 mt-0.5 flex-shrink-0">•</span>
+                        <span class="flex-1">{{ issue }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            <!-- Full Recommendations -->
+            {% if res.ai_analysis.recommendations %}
+            <div class="bg-blue-500/5 rounded-lg border border-blue-500/20 p-4">
+                <h5 class="text-xs font-bold text-blue-400 uppercase mb-3">All Recommendations</h5>
+                <ul class="space-y-2">
+                    {% for rec in res.ai_analysis.recommendations %}
+                    <li class="text-xs text-blue-300 flex items-start gap-2">
+                        <span class="text-blue-500 mt-0.5 flex-shrink-0">→</span>
+                        <span class="flex-1">{{ rec }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Files Tab -->
+        {% if res.ai_analysis.file_summaries %}
+        <div x-show="activeTab === 'files'" class="space-y-2">
+            {% for item in res.ai_analysis.file_summaries %}
+            <div x-data="{ expanded: false, fullPath: '{{ item.file|replace('\\', '/') }}', fileName: '{{ item.file|replace('\\', '/') }}'.split('/').pop() }" 
+                 class="bg-gray-900/30 rounded-lg border border-gray-700/50 p-3 hover:bg-gray-800/50 transition-colors">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="flex-1 min-w-0">
+                        <p class="text-sm text-gray-200 leading-relaxed mb-2">{{ item.description }}</p>
+                        <button @click="expanded = !expanded" 
+                                class="flex items-center gap-2 text-xs font-mono text-mongo-green hover:text-green-300 transition-colors">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                            <span x-text="fileName" class="font-semibold"></span>
+                            <svg class="w-3.5 h-3.5 transform transition-transform" 
+                                 :class="expanded ? 'rotate-180' : ''" 
+                                 fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div x-show="expanded" x-collapse class="mt-2 text-xs text-gray-400 font-mono bg-black/30 p-2 rounded border border-gray-700/50 break-all">
+                    <span x-text="fullPath"></span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Context Tab -->
+        <div x-show="activeTab === 'context'" class="space-y-4">
+            <!-- Files Changed in PR -->
+            {% if res.pr_files %}
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-4">
+                <div class="flex items-center gap-2 mb-3">
+                    <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                    <h4 class="text-xs font-bold text-blue-400 uppercase tracking-wider">Files Changed in PR</h4>
+                    <span class="text-xs text-gray-500">({{ res.pr_files|length }} file{{ 's' if res.pr_files|length != 1 else '' }})</span>
+                </div>
+                <div class="space-y-1.5 max-h-64 overflow-y-auto custom-scrollbar">
+                    {% for file_path in res.pr_files %}
+                    <div class="flex items-center gap-2 text-xs font-mono text-gray-300 bg-gray-800/50 px-3 py-1.5 rounded border border-gray-700/50 hover:bg-gray-800 transition-colors">
+                        <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        <a href="https://github.com/{{ owner }}/{{ repo }}/blob/{{ head_commit_sha|default(head_ref|default('main')) }}/{{ file_path|urlencode_path }}" 
+                           target="_blank" 
+                           class="truncate text-mongo-green hover:text-green-300 hover:underline transition-colors flex items-center gap-1">
+                            <span class="truncate">{{ file_path }}</span>
+                            <svg class="w-3 h-3 flex-shrink-0 opacity-50 hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                        </a>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Indexing Paths Used -->
+            {% if res.indexing_paths %}
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-4">
+                <div class="flex items-center gap-2 mb-3">
+                    <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                    <h4 class="text-xs font-bold text-purple-400 uppercase tracking-wider">Targeted Indexing Paths</h4>
+                    <span class="text-xs text-gray-500">({{ res.indexing_paths|length }} path{{ 's' if res.indexing_paths|length != 1 else '' }})</span>
+                </div>
+                <div class="space-y-1.5">
+                    {% for path in res.indexing_paths %}
+                    <div class="flex items-center gap-2 text-xs font-mono text-gray-300 bg-gray-800/50 px-3 py-1.5 rounded border border-gray-700/50 hover:bg-gray-800 transition-colors">
+                        <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                        <a href="https://github.com/{{ owner }}/{{ repo }}/tree/{{ head_commit_sha|default(head_ref|default('main')) }}/{{ path|urlencode_path }}" 
+                           target="_blank" 
+                           class="truncate text-purple-400 hover:text-purple-300 hover:underline transition-colors flex items-center gap-1">
+                            <span class="truncate">{{ path }}</span>
+                            <svg class="w-3 h-3 flex-shrink-0 opacity-50 hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                        </a>
+                    </div>
+                    {% endfor %}
+                </div>
+                <p class="text-xs text-gray-500 mt-2">These paths were used to scope the vector search index for relevant codebase context.</p>
+            </div>
+            {% else %}
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                    <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider">Indexing Scope</h4>
+                </div>
+                <p class="text-xs text-gray-500">Full repository indexed (no path restrictions)</p>
+            </div>
+            {% endif %}
+
+            <!-- Vector Search Results (RAG Sources) -->
+            {% if res.rag_sources %}
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-4">
+                <div class="flex items-center gap-2 mb-3">
+                    <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                    <h4 class="text-xs font-bold text-indigo-400 uppercase tracking-wider">Vector Search Results</h4>
+                    <span class="text-xs text-gray-500">({{ res.rag_sources|length }} related file{{ 's' if res.rag_sources|length != 1 else '' }})</span>
+                </div>
+                <p class="text-xs text-gray-500 mb-3">Codebase context retrieved via semantic search to augment the review:</p>
+                <div class="space-y-2">
+                    {% for source in res.rag_sources %}
+                    <div x-data="{ open: false }" class="border border-gray-700/50 rounded-lg overflow-hidden bg-gray-800/30">
+                        <button @click="open = !open" class="w-full flex justify-between items-center px-4 py-2.5 bg-gray-800 hover:bg-gray-700/80 transition-colors text-left">
+                            <span class="text-xs font-mono text-mongo-green truncate max-w-2xl">
+                                {{ source.file_path }} <span class="text-gray-500">(L{{ source.line_start }}-{{ source.line_end }})</span>
+                            </span>
+                            <span class="text-xs text-indigo-400 font-bold uppercase" x-text="open ? 'Hide' : 'View'"></span>
+                        </button>
+                        <div x-show="open" x-collapse>
+                            <pre class="!m-0 !rounded-none !bg-gray-900/80 !p-4 !border-t !border-gray-700/50"><code class="language-python text-xs leading-relaxed">{{ source.content }}</code></pre>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% else %}
+            <div class="bg-gray-900/30 rounded-lg border border-gray-800/50 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                    <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider">Vector Search Results</h4>
+                </div>
+                <p class="text-xs text-gray-500">No vector search results available (semantic search may be disabled or no relevant context found)</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- Follow-up Questions Section -->
+    <div class="border-t border-gray-700/50 p-5 bg-gray-900/30" 
+         x-data="{ 
+             questions: [],
+             currentQuestion: '',
+             isLoading: false,
+             reviewId: '{{ res.id }}',
+             
+             async askQuestion() {
+                 if (!this.currentQuestion.trim() || this.isLoading) return;
+                 
+                 const question = this.currentQuestion.trim();
+                 this.currentQuestion = '';
+                 this.isLoading = true;
+                 
+                 this.questions.push({
+                     role: 'user',
+                     text: question,
+                     timestamp: new Date().toLocaleTimeString()
+                 });
+                 
+                 try {
+                     const response = await fetch('/analyze/followup', {
+                         method: 'POST',
+                         headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify({
+                             review_id: this.reviewId,
+                             question: question
+                         })
+                     });
+                     
+                     if (!response.ok) throw new Error('Failed to get response');
+                     
+                     const data = await response.json();
+                     this.questions.push({
+                         role: 'assistant',
+                         text: data.answer,
+                         timestamp: new Date().toLocaleTimeString()
+                     });
+                 } catch (error) {
+                     this.questions.push({
+                         role: 'assistant',
+                         text: 'Sorry, I encountered an error. Please try again.',
+                         timestamp: new Date().toLocaleTimeString(),
+                         error: true
+                     });
+                 } finally {
+                     this.isLoading = false;
+                 }
+             }
+         }">
+        <div class="flex items-center gap-2 mb-3">
+            <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
+            <h4 class="text-xs font-bold text-purple-400 uppercase">Follow-up Questions</h4>
+        </div>
+        
+        <div class="space-y-2 mb-3 max-h-48 overflow-y-auto custom-scrollbar" x-show="questions.length > 0">
+            <template x-for="(q, index) in questions" :key="index">
+                <div class="flex gap-2" :class="q.role === 'user' ? 'justify-end' : 'justify-start'">
+                    <div class="max-w-[80%] rounded-lg p-2.5 text-xs border"
+                         :class="q.role === 'user' 
+                             ? 'bg-mongo-green/10 border-mongo-green/30 text-gray-200' 
+                             : (q.error 
+                                 ? 'bg-red-900/20 border-red-800/50 text-red-300' 
+                                 : 'bg-gray-800/50 border-gray-700/50 text-gray-300')">
+                        <div class="flex items-center gap-1.5 mb-1">
+                            <span class="text-[10px] font-bold uppercase"
+                                  :class="q.role === 'user' ? 'text-mongo-green' : (q.error ? 'text-red-400' : 'text-purple-400')"
+                                  x-text="q.role === 'user' ? 'You' : 'AI'"></span>
+                            <span class="text-[10px] text-gray-500" x-text="q.timestamp"></span>
+                        </div>
+                        <p class="text-xs leading-relaxed whitespace-pre-wrap" x-text="q.text"></p>
+                    </div>
+                </div>
+            </template>
+        </div>
+        
+        <div class="flex gap-2">
+            <textarea 
+                x-model="currentQuestion"
+                @keydown.enter.prevent="if (!event.shiftKey) askQuestion()"
+                placeholder="Ask a question... (Shift+Enter for new line)"
+                class="flex-1 bg-gray-900/50 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-purple-500/50 resize-none"
+                rows="2"
+                :disabled="isLoading"></textarea>
+            <button 
+                @click="askQuestion()"
+                :disabled="!currentQuestion.trim() || isLoading"
+                class="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-800 disabled:text-gray-600 text-white text-xs font-bold rounded-lg transition-colors">
+                <template x-if="!isLoading">Ask</template>
+                <template x-if="isLoading">
+                    <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                </template>
+            </button>
+        </div>
+    </div>
+</div>

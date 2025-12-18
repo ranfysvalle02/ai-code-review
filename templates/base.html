@@ -43,6 +43,62 @@
         ::-webkit-scrollbar-track { background: #001620; }
         ::-webkit-scrollbar-thumb { background: #00684A; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #00ED64; }
+        
+        /* Modal Styles - Classic CSS */
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.75);
+            z-index: 9998;
+        }
+        
+        .modal-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            pointer-events: none;
+        }
+        
+        .modal-container.open {
+            pointer-events: auto;
+        }
+        
+        .modal-dialog {
+            background-color: #001620;
+            border-radius: 0.75rem;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+            max-width: 90vw;
+            max-height: 90vh;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            pointer-events: auto;
+            overflow: hidden;
+        }
+        
+        @media (min-width: 768px) {
+            .modal-dialog {
+                max-width: 48rem;
+            }
+        }
+        
+        .content-hidden {
+            display: none;
+        }
+        
+        .content-visible {
+            display: block;
+        }
     </style>
 </head>
 <body class="bg-mongo-slate min-h-screen text-gray-200 font-sans antialiased selection:bg-mongo-green selection:text-mongo-slate">
@@ -54,6 +110,12 @@
             </h1>
             <nav class="flex items-center space-x-6">
                 <a href="/" class="text-gray-400 hover:text-mongo-green font-medium transition-colors">Home</a>
+                <a href="/dashboard" class="text-gray-400 hover:text-mongo-green font-medium transition-colors flex items-center gap-1">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                    </svg>
+                    Control Panel
+                </a>
                 <a href="https://github.com" target="_blank" class="text-gray-400 hover:text-mongo-green font-medium transition-colors">GitHub</a>
                 
                 <!-- Floating Help Button / About -->

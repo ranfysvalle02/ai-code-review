@@ -1,0 +1,1501 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <div class="max-w-7xl mx-auto" x-data="{
+        prs: {{ prs|tojson|safe }},
+        merged_prs: [],
+        closed_prs: [],
+        page_info: {{ page_info|tojson|safe }},
+        current_cursor: '{{ current_cursor or "" }}',
+        current_state: '{{ current_state or "OPEN" }}',
+        current_user: '{{ current_user or "" }}',
+        loading: false,
+        loading_merged: false,
+        loading_closed: false,
+        progress: [],
+        error: null,
+        show_open: true,
+        show_merged: false,
+        show_closed: false,
+        sortBy: 'activity',
+        sortDirection: 'desc',
+        filters: {
+            state: 'OPEN',
+            repo: '',
+            role: '',
+            dateFrom: '',
+            dateTo: ''
+        },
+        stats: {
+            total: 0,
+            author: 0,
+            reviewer: 0,
+            contributor: 0
+        },
+        previewModal: {
+            open: false,
+            loading: false,
+            error: null,
+            pr: null,
+            comments: null
+        },
+        
+        init() {
+            // Explicitly reset modal state on page load - ensure modal is closed
+            this.previewModal = {
+                open: false,
+                loading: false,
+                error: null,
+                pr: null,
+                comments: null
+            };
+            
+            // Ensure body scroll is unlocked
+            document.body.style.overflow = '';
+            
+            // Force close any lingering modal elements (safety check)
+            const modalBackdrop = document.querySelector('.modal-backdrop');
+            const modalContainer = document.querySelector('.modal-container');
+            if (modalBackdrop) {
+                modalBackdrop.style.display = 'none';
+            }
+            if (modalContainer) {
+                modalContainer.style.display = 'none';
+            }
+            
+            // Try to restore cached PRs from sessionStorage
+            try {
+                const cachedMerged = sessionStorage.getItem('merged_prs');
+                const cachedClosed = sessionStorage.getItem('closed_prs');
+                const cachedShowMerged = sessionStorage.getItem('show_merged');
+                const cachedShowClosed = sessionStorage.getItem('show_closed');
+                const cachedShowOpen = sessionStorage.getItem('show_open');
+                
+                // Restore open visibility state
+                if (cachedShowOpen === 'false') {
+                    this.show_open = false;
+                }
+                
+                if (cachedMerged) {
+                    this.merged_prs = JSON.parse(cachedMerged);
+                    // Restore visibility state if it was saved
+                    if (cachedShowMerged === 'true' && this.merged_prs.length > 0) {
+                        this.show_merged = true;
+                    }
+                }
+                if (cachedClosed) {
+                    this.closed_prs = JSON.parse(cachedClosed);
+                    // Restore visibility state if it was saved
+                    if (cachedShowClosed === 'true' && this.closed_prs.length > 0) {
+                        this.show_closed = true;
+                    }
+                }
+            } catch (e) {
+                console.error('Error loading cached PRs:', e);
+            }
+            
+            // Initialize stats to show 0 initially
+            this.updateStats();
+            // Load OPEN PRs on page load
+            this.loadPRs('OPEN');
+        },
+        
+        async loadPRs(state = 'OPEN') {
+            if (state === 'MERGED') {
+                this.loading_merged = true;
+            } else if (state === 'CLOSED') {
+                this.loading_closed = true;
+            } else {
+                this.loading = true;
+            }
+            this.progress = [];
+            this.error = null;
+            
+            // Build query params - always use OPEN for main dashboard
+            const params = new URLSearchParams();
+            params.set('state', state);
+            if (this.filters.repo) params.set('repo', this.filters.repo);
+            if (this.filters.role) params.set('role', this.filters.role);
+            if (state === 'OPEN' && this.current_cursor) params.set('cursor', this.current_cursor);
+            
+            const evtSource = new EventSource(`/dashboard/stream?${params.toString()}`);
+            
+            evtSource.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === 'progress') {
+                    this.progress.push(data.msg);
+                    // Keep only last 20 progress messages
+                    if (this.progress.length > 20) {
+                        this.progress.shift();
+                    }
+                } else if (data.type === 'result') {
+                    try {
+                        if (state === 'MERGED') {
+                            this.merged_prs = this.applySorting(data.prs || []);
+                            this.show_merged = true;
+                            // Cache in sessionStorage
+                            try {
+                                sessionStorage.setItem('merged_prs', JSON.stringify(this.merged_prs));
+                                sessionStorage.setItem('show_merged', 'true');
+                            } catch (e) {
+                                console.warn('Could not cache merged PRs:', e);
+                            }
+                        } else if (state === 'CLOSED') {
+                            this.closed_prs = this.applySorting(data.prs || []);
+                            this.show_closed = true;
+                            // Cache in sessionStorage
+                            try {
+                                sessionStorage.setItem('closed_prs', JSON.stringify(this.closed_prs));
+                                sessionStorage.setItem('show_closed', 'true');
+                            } catch (e) {
+                                console.warn('Could not cache closed PRs:', e);
+                            }
+                        } else {
+                            this.prs = this.applySorting(data.prs || []);
+                            this.page_info = data.page_info || {};
+                        }
+                        // Update stats immediately
+                        this.updateStats();
+                    } catch (e) {
+                        console.error('Error processing PR results:', e);
+                        // Fallback: use data as-is without sorting
+                        if (state === 'MERGED') {
+                            this.merged_prs = data.prs || [];
+                            this.show_merged = true;
+                            // Cache in sessionStorage
+                            try {
+                                sessionStorage.setItem('merged_prs', JSON.stringify(this.merged_prs));
+                                sessionStorage.setItem('show_merged', 'true');
+                            } catch (e) {
+                                console.warn('Could not cache merged PRs:', e);
+                            }
+                        } else if (state === 'CLOSED') {
+                            this.closed_prs = data.prs || [];
+                            this.show_closed = true;
+                            // Cache in sessionStorage
+                            try {
+                                sessionStorage.setItem('closed_prs', JSON.stringify(this.closed_prs));
+                                sessionStorage.setItem('show_closed', 'true');
+                            } catch (e) {
+                                console.warn('Could not cache closed PRs:', e);
+                            }
+                        } else {
+                            this.prs = data.prs || [];
+                            this.page_info = data.page_info || {};
+                        }
+                        // Update stats immediately
+                        this.updateStats();
+                    }
+                } else if (data.type === 'error') {
+                    this.error = data.msg;
+                    if (state === 'MERGED') {
+                        this.loading_merged = false;
+                    } else if (state === 'CLOSED') {
+                        this.loading_closed = false;
+                    } else {
+                        this.loading = false;
+                    }
+                    evtSource.close();
+                } else if (data.type === 'done') {
+                    if (state === 'MERGED') {
+                        this.loading_merged = false;
+                    } else if (state === 'CLOSED') {
+                        this.loading_closed = false;
+                    } else {
+                        this.loading = false;
+                    }
+                    evtSource.close();
+                }
+            };
+            
+            evtSource.onerror = () => {
+                if (state === 'MERGED') {
+                    this.loading_merged = false;
+                } else if (state === 'CLOSED') {
+                    this.loading_closed = false;
+                } else {
+                    this.loading = false;
+                }
+                evtSource.close();
+            };
+        },
+        
+        async loadMergedPRs() {
+            // Check if we have cached data first
+            if (this.merged_prs.length > 0) {
+                // Already loaded (from cache or previous load), just show them
+                this.show_merged = true;
+                this.updateStats();
+                return;
+            }
+            
+            // Check sessionStorage
+            try {
+                const cached = sessionStorage.getItem('merged_prs');
+                if (cached) {
+                    this.merged_prs = JSON.parse(cached);
+                    this.show_merged = true;
+                    this.updateStats();
+                    return;
+                }
+            } catch (e) {
+                console.warn('Error reading cached merged PRs:', e);
+            }
+            
+            // Only make request if we don't have cached data
+            await this.loadPRs('MERGED');
+        },
+        
+        async loadClosedPRs() {
+            // Check if we have cached data first
+            if (this.closed_prs.length > 0) {
+                // Already loaded (from cache or previous load), just show them
+                this.show_closed = true;
+                this.updateStats();
+                return;
+            }
+            
+            // Check sessionStorage
+            try {
+                const cached = sessionStorage.getItem('closed_prs');
+                if (cached) {
+                    this.closed_prs = JSON.parse(cached);
+                    this.show_closed = true;
+                    this.updateStats();
+                    return;
+                }
+            } catch (e) {
+                console.warn('Error reading cached closed PRs:', e);
+            }
+            
+            // Only make request if we don't have cached data
+            await this.loadPRs('CLOSED');
+        },
+        
+        toggleMerged() {
+            // Just toggle visibility, don't trigger new requests
+            // Only works if PRs are already loaded (from cache or previous request)
+            if (this.merged_prs.length > 0) {
+                if (this.show_merged) {
+                    // If already showing, hide it and show open by default
+                    this.show_merged = false;
+                    this.show_open = true;
+                    this.show_closed = false;
+                } else {
+                    // Show merged and hide others
+                    this.show_merged = true;
+                    this.show_open = false;
+                    this.show_closed = false;
+                }
+                // Save visibility state to sessionStorage
+                try {
+                    sessionStorage.setItem('show_merged', this.show_merged.toString());
+                    sessionStorage.setItem('show_open', this.show_open.toString());
+                    sessionStorage.setItem('show_closed', this.show_closed.toString());
+                } catch (e) {
+                    console.warn('Could not save visibility state:', e);
+                }
+                this.updateStats();
+            }
+        },
+        
+        toggleClosed() {
+            // Just toggle visibility, don't trigger new requests
+            // Only works if PRs are already loaded (from cache or previous request)
+            if (this.closed_prs.length > 0) {
+                if (this.show_closed) {
+                    // If already showing, hide it and show open by default
+                    this.show_closed = false;
+                    this.show_open = true;
+            this.show_merged = false;
+                } else {
+                    // Show closed and hide others
+                    this.show_closed = true;
+                    this.show_open = false;
+                    this.show_merged = false;
+                }
+                // Save visibility state to sessionStorage
+                try {
+                    sessionStorage.setItem('show_closed', this.show_closed.toString());
+                    sessionStorage.setItem('show_open', this.show_open.toString());
+                    sessionStorage.setItem('show_merged', this.show_merged.toString());
+                } catch (e) {
+                    console.warn('Could not save visibility state:', e);
+                }
+                this.updateStats();
+            }
+        },
+        
+        toggleOpen() {
+            // Toggle Open PRs visibility
+            if (this.show_open) {
+                // If already showing, just hide it (don't auto-show others)
+                this.show_open = false;
+            } else {
+                // Show open and hide others
+                this.show_open = true;
+                this.show_merged = false;
+                this.show_closed = false;
+            }
+            // Save visibility state to sessionStorage
+            try {
+                sessionStorage.setItem('show_open', this.show_open.toString());
+                sessionStorage.setItem('show_merged', this.show_merged.toString());
+                sessionStorage.setItem('show_closed', this.show_closed.toString());
+            } catch (e) {
+                console.warn('Could not save visibility state:', e);
+            }
+            this.updateStats();
+        },
+        
+        setSortBy(sortType) {
+            if (this.sortBy === sortType) {
+                // Toggle direction if same sort
+                this.sortDirection = this.sortDirection === 'desc' ? 'asc' : 'desc';
+            } else {
+                this.sortBy = sortType;
+                this.sortDirection = 'desc'; // Default to desc for new sorts
+            }
+            // Re-sort current PRs
+            this.prs = this.applySorting(this.prs);
+            this.merged_prs = this.applySorting(this.merged_prs);
+            this.closed_prs = this.applySorting(this.closed_prs);
+            // Update stats after sorting (in case visibility changed)
+            this.updateStats();
+        },
+        
+        applySorting(prs) {
+            if (!prs || !Array.isArray(prs) || prs.length === 0) {
+                return prs || [];
+            }
+            
+            const sorted = [...prs];
+            const isDesc = this.sortDirection === 'desc';
+            
+            try {
+                sorted.sort((a, b) => {
+                    let valueA, valueB;
+                    
+                    switch (this.sortBy) {
+                        case 'lines':
+                            // Sort by total line changes (additions + deletions)
+                            valueA = (a.additions || 0) + (a.deletions || 0);
+                            valueB = (b.additions || 0) + (b.deletions || 0);
+                            break;
+                        case 'files':
+                            // Sort by number of files changed
+                            valueA = a.changedFiles || 0;
+                            valueB = b.changedFiles || 0;
+                            break;
+                        case 'date':
+                        case 'date-desc':
+                            // Sort by updated date (most recent first)
+                            valueA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+                            valueB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+                            break;
+                        case 'activity':
+                        default:
+                            // Use existing activity score
+                            return this.sortByActivity(a, b, isDesc);
+                    }
+                    
+                    // For numeric sorts
+                    if (this.sortBy !== 'activity') {
+                        if (valueA === valueB) {
+                            // Secondary sort by date if values are equal
+                            const dateA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+                            const dateB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+                            return isDesc ? dateB - dateA : dateA - dateB;
+                        }
+                        return isDesc ? valueB - valueA : valueA - valueB;
+                    }
+                    
+                    return 0;
+                });
+            } catch (e) {
+                console.error('Error sorting PRs:', e);
+                return prs;
+            }
+            
+            return sorted;
+        },
+        
+        sortByActivity(a, b, isDesc = true) {
+            if (!a || !b) return 0;
+            
+                    try {
+                        // Calculate activity score: reviewThreads + comments + recent updates
+                        const getActivityScore = (pr) => {
+                            if (!pr) return 0;
+                            const threads = (pr.reviewThreads && typeof pr.reviewThreads.totalCount === 'number') ? pr.reviewThreads.totalCount : 0;
+                            const comments = (pr.comments && typeof pr.comments.totalCount === 'number') ? pr.comments.totalCount : 0;
+                            const reviews = (pr.reviews && Array.isArray(pr.reviews.nodes)) ? pr.reviews.nodes.length : 0;
+                            
+                            // Recent activity bonus (updated in last 7 days = +10, last 30 days = +5)
+                            let recencyBonus = 0;
+                            try {
+                                const dateStr = pr.updatedAt || pr.createdAt;
+                                if (dateStr) {
+                                    const updatedAt = new Date(dateStr);
+                                    if (!isNaN(updatedAt.getTime())) {
+                                        const daysSinceUpdate = (Date.now() - updatedAt.getTime()) / (1000 * 60 * 60 * 24);
+                                        if (daysSinceUpdate < 7) recencyBonus = 10;
+                                        else if (daysSinceUpdate < 30) recencyBonus = 5;
+                                    }
+                                }
+                            } catch (e) {
+                                // Ignore date parsing errors
+                            }
+                            
+                            return threads * 3 + comments * 2 + reviews * 2 + recencyBonus;
+                        };
+                        
+                        const scoreA = getActivityScore(a);
+                        const scoreB = getActivityScore(b);
+                        
+                        // If same activity, sort by most recently updated
+                        if (scoreA === scoreB) {
+                            try {
+                                const dateA = new Date(a.updatedAt || a.createdAt || 0);
+                                const dateB = new Date(b.updatedAt || b.createdAt || 0);
+                                if (!isNaN(dateA.getTime()) && !isNaN(dateB.getTime())) {
+                            return isDesc ? dateB - dateA : dateA - dateB;
+                                }
+                            } catch (e) {
+                                // Ignore date comparison errors
+                            }
+                            return 0;
+                        }
+                        
+                return isDesc ? scoreB - scoreA : scoreA - scoreB;
+                    } catch (e) {
+                console.error('Error calculating activity score:', e);
+                        return 0;
+            }
+        },
+        
+        updateStats() {
+            try {
+                // Only count PRs that are currently visible/shown
+                const visible_prs = [
+                    ...(this.show_open ? (this.prs || []) : []), // Open PRs only if shown
+                    ...(this.show_merged ? (this.merged_prs || []) : []),
+                    ...(this.show_closed ? (this.closed_prs || []) : [])
+                ];
+                const total = visible_prs.length;
+                // Count roles - a PR can have multiple roles
+                let authorCount = 0, reviewerCount = 0, contributorCount = 0;
+                visible_prs.forEach(pr => {
+                    if (pr && pr.user_role && Array.isArray(pr.user_role)) {
+                        const roles = pr.user_role;
+                        if (roles.includes('author')) authorCount++;
+                        if (roles.includes('reviewer')) reviewerCount++;
+                        if (roles.includes('contributor')) contributorCount++;
+                    }
+                });
+                // Update stats object properties directly to ensure reactivity
+                this.stats = {
+                    total: total,
+                    author: authorCount,
+                    reviewer: reviewerCount,
+                    contributor: contributorCount
+                };
+            } catch (e) {
+                console.error('Error updating stats:', e);
+                // Set defaults on error
+                const visible_prs = [
+                    ...(this.show_open ? (this.prs || []) : []),
+                    ...(this.show_merged ? (this.merged_prs || []) : []),
+                    ...(this.show_closed ? (this.closed_prs || []) : [])
+                ];
+                const total = visible_prs.length;
+                this.stats = {
+                    total: total,
+                    author: 0,
+                    reviewer: 0,
+                    contributor: 0
+                };
+            }
+        },
+        
+        applyFilters() {
+            this.current_cursor = null; // Reset pagination
+            this.loadPRs('OPEN'); // Always load OPEN PRs when filtering
+        },
+        
+        clearFilters() {
+            this.filters = {
+                state: 'OPEN',
+                repo: '',
+                role: '',
+                dateFrom: '',
+                dateTo: ''
+            };
+            this.merged_prs = [];
+            this.closed_prs = [];
+            this.show_open = true;
+            this.show_merged = false;
+            this.show_closed = false;
+            // Clear sessionStorage cache
+            try {
+                sessionStorage.removeItem('merged_prs');
+                sessionStorage.removeItem('closed_prs');
+                sessionStorage.removeItem('show_merged');
+                sessionStorage.removeItem('show_closed');
+                sessionStorage.removeItem('show_open');
+            } catch (e) {
+                console.warn('Could not clear cache:', e);
+            }
+            this.applyFilters();
+        },
+        
+        getUniqueRepos() {
+            const repos = new Set();
+            this.prs.forEach(pr => {
+                const owner = pr.repository?.owner?.login || '';
+                const name = pr.repository?.name || '';
+                if (owner && name) {
+                    repos.add(`${owner}/${name}`);
+                }
+            });
+            return Array.from(repos).sort();
+        },
+        
+        
+        getPRLinks(pr) {
+            try {
+                if (!pr || !pr.url) {
+                    return {
+                        pr: '#',
+                        files: '#',
+                        commits: '#',
+                        latestCommit: '#',
+                        compare: '#'
+                    };
+                }
+                const baseUrl = pr.url;
+                const owner = (pr.repository && pr.repository.owner) ? pr.repository.owner.login : '';
+                const repo = pr.repository ? pr.repository.name : '';
+                const branch = pr.headRefName || '';
+                
+                return {
+                    pr: baseUrl,
+                    files: `${baseUrl}/files`,
+                    commits: `${baseUrl}/commits`,
+                    latestCommit: branch ? `https://github.com/${owner}/${repo}/commit/${branch}` : `${baseUrl}/commits`,
+                    compare: branch ? `https://github.com/${owner}/${repo}/compare/${branch}` : baseUrl
+                };
+            } catch (e) {
+                console.error('Error generating PR links:', e);
+                return {
+                    pr: '#',
+                    files: '#',
+                    commits: '#',
+                    latestCommit: '#',
+                    compare: '#'
+                };
+            }
+        },
+        
+        async openPreviewModal(pr) {
+            this.previewModal.open = true;
+            this.previewModal.pr = pr;
+            this.previewModal.loading = true;
+            this.previewModal.error = null;
+            this.previewModal.comments = null;
+            
+            // Lock body scroll
+            document.body.style.overflow = 'hidden';
+            
+            try {
+                const owner = pr.repository.owner.login;
+                const repo = pr.repository.name;
+                const prNumber = pr.number;
+                
+                const response = await fetch(`/api/prs/${owner}/${repo}/${prNumber}/comments`);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch comments: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                // Ensure items is an array for Alpine.js reactivity
+                if (data.items && !Array.isArray(data.items)) {
+                    data.items = [];
+                }
+                this.previewModal.comments = data;
+            } catch (e) {
+                console.error('Error fetching comments:', e);
+                this.previewModal.error = e.message || 'Failed to load comments';
+            } finally {
+                this.previewModal.loading = false;
+            }
+        },
+        
+        closePreviewModal() {
+            this.previewModal.open = false;
+            this.previewModal.pr = null;
+            this.previewModal.comments = null;
+            this.previewModal.error = null;
+            this.previewModal.loading = false;
+            
+            // Unlock body scroll
+            document.body.style.overflow = '';
+        },
+        
+        formatDate(dateString) {
+            if (!dateString) return '';
+            try {
+                const date = new Date(dateString);
+                return date.toLocaleDateString('en-US', { 
+                    year: 'numeric', 
+                    month: 'short', 
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+            } catch (e) {
+                return dateString;
+            }
+        },
+    }">
+        <!-- Main Container -->
+        <div class="relative">
+                <!-- HUD Header -->
+        <div class="mb-8">
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <h1 class="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-mongo-green to-blue-400 mb-2">
+                        🎮 Control Panel
+                    </h1>
+                    <p class="text-gray-400">
+                        <template x-if="current_user">
+                            <span>Tracking <span class="text-mongo-green font-bold" x-text="current_user"></span>'s open source activity</span>
+                        </template>
+                        <template x-if="!current_user">
+                            <span>Your pull request dashboard</span>
+                        </template>
+                    </p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <a href="/" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors">
+                        ← Back to Feed
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Message -->
+        <template x-if="error">
+            <div class="bg-red-900/50 border border-red-700 text-red-200 px-4 py-3 rounded-lg mb-6" x-text="error"></div>
+        </template>
+
+        <!-- Stats Bar -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-gradient-to-br from-green-500/10 to-green-600/5 border border-green-500/30 rounded-xl p-4">
+                <div class="text-sm text-gray-400 mb-1">Visible PRs</div>
+                <div class="text-2xl font-bold text-green-400" x-text="loading ? '-' : (stats.total || 0)">0</div>
+                <div class="text-xs text-gray-500 mt-1">
+                    <template x-if="show_open && prs.length > 0">
+                        <span x-text="`${prs.length} open`"></span>
+                    </template>
+                    <template x-if="show_merged && merged_prs.length > 0">
+                        <span x-text="`${show_open && prs.length > 0 ? ', ' : ''}${merged_prs.length} merged`"></span>
+                    </template>
+                    <template x-if="show_closed && closed_prs.length > 0">
+                        <span x-text="`${(show_open && prs.length > 0) || (show_merged && merged_prs.length > 0) ? ', ' : ''}${closed_prs.length} closed`"></span>
+                    </template>
+                    <template x-if="!show_open && !show_merged && !show_closed">
+                        <span class="text-gray-600">No sections visible</span>
+                    </template>
+                </div>
+            </div>
+            <div class="bg-gradient-to-br from-blue-500/10 to-blue-600/5 border border-blue-500/30 rounded-xl p-4">
+                <div class="text-sm text-gray-400 mb-1">As Author</div>
+                <div class="text-2xl font-bold text-blue-400" x-text="loading ? '-' : (stats.author || 0)">0</div>
+                <div class="text-xs text-gray-500 mt-1">Visible only</div>
+            </div>
+            <div class="bg-gradient-to-br from-purple-500/10 to-purple-600/5 border border-purple-500/30 rounded-xl p-4">
+                <div class="text-sm text-gray-400 mb-1">As Reviewer</div>
+                <div class="text-2xl font-bold text-purple-400" x-text="loading ? '-' : (stats.reviewer || 0)">0</div>
+                <div class="text-xs text-gray-500 mt-1">Visible only</div>
+            </div>
+            <div class="bg-gradient-to-br from-yellow-500/10 to-yellow-600/5 border border-yellow-500/30 rounded-xl p-4">
+                <div class="text-sm text-gray-400 mb-1">Contributing</div>
+                <div class="text-2xl font-bold text-yellow-400" x-text="loading ? '-' : (stats.contributor || 0)">0</div>
+                <div class="text-xs text-gray-500 mt-1">Visible only</div>
+            </div>
+        </div>
+        
+        <!-- Advanced Filters -->
+        <div class="bg-gray-800/60 p-4 rounded-xl border border-gray-700 mb-6">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-bold text-white">Advanced Filters & Sorting</h3>
+                <div class="flex items-center gap-3">
+                    <template x-if="closed_prs.length === 0">
+                        <button @click="loadClosedPRs()" 
+                                :disabled="loading_closed"
+                                class="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/50 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
+                            <template x-if="!loading_closed">
+                                <span>🔒 Load Closed PRs</span>
+                            </template>
+                            <template x-if="loading_closed">
+                                <span>⏳ Loading...</span>
+                            </template>
+                        </button>
+                    </template>
+                    <template x-if="closed_prs.length > 0">
+                        <button @click="toggleClosed()" 
+                                :class="show_closed ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/50' : 'bg-gray-500/20 hover:bg-gray-500/30 text-gray-400 border-gray-500/50'"
+                                class="px-3 py-1.5 border rounded-lg text-xs font-bold transition-all flex items-center gap-2">
+                            <template x-if="show_closed">
+                                <span>✅ Closed (<span x-text="closed_prs.length"></span>)</span>
+                            </template>
+                            <template x-if="!show_closed">
+                                <span>🔒 Show Closed (<span x-text="closed_prs.length"></span>)</span>
+                            </template>
+                        </button>
+                    </template>
+                    <template x-if="merged_prs.length === 0">
+                    <button @click="loadMergedPRs()" 
+                            :disabled="loading_merged"
+                            class="px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 border border-purple-500/50 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
+                            <template x-if="!loading_merged">
+                            <span>📦 Load Merged PRs</span>
+                        </template>
+                        <template x-if="loading_merged">
+                            <span>⏳ Loading...</span>
+                        </template>
+                        </button>
+                    </template>
+                    <template x-if="merged_prs.length > 0">
+                        <button @click="toggleMerged()" 
+                                :class="show_merged ? 'bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 border-purple-500/50' : 'bg-gray-500/20 hover:bg-gray-500/30 text-gray-400 border-gray-500/50'"
+                                class="px-3 py-1.5 border rounded-lg text-xs font-bold transition-all flex items-center gap-2">
+                            <template x-if="show_merged">
+                            <span>✅ Merged (<span x-text="merged_prs.length"></span>)</span>
+                        </template>
+                            <template x-if="!show_merged">
+                                <span>📦 Show Merged (<span x-text="merged_prs.length"></span>)</span>
+                        </template>
+                    </button>
+                    </template>
+                    <button @click="clearFilters()" class="text-xs text-gray-400 hover:text-gray-300">Clear Filters</button>
+                </div>
+            </div>
+            
+            <!-- Sorting Controls -->
+            <div class="mb-4 pb-4 border-b border-gray-700">
+                <label class="block text-xs font-semibold text-gray-400 mb-2">Sort By</label>
+                <div class="flex flex-wrap gap-2">
+                    <button @click="setSortBy('activity')" 
+                            :class="sortBy === 'activity' ? 'bg-mongo-green/30 border-mongo-green/50 text-mongo-green' : 'bg-gray-700/50 border-gray-600 text-gray-300 hover:bg-gray-600'"
+                            class="px-3 py-1.5 border rounded-lg text-xs font-medium transition-all flex items-center gap-1.5">
+                        <span>Activity</span>
+                        <template x-if="sortBy === 'activity'">
+                            <svg class="w-3 h-3" :class="sortDirection === 'desc' ? '' : 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                    </svg>
+                        </template>
+                    </button>
+                    <button @click="setSortBy('lines')" 
+                            :class="sortBy === 'lines' ? 'bg-mongo-green/30 border-mongo-green/50 text-mongo-green' : 'bg-gray-700/50 border-gray-600 text-gray-300 hover:bg-gray-600'"
+                            class="px-3 py-1.5 border rounded-lg text-xs font-medium transition-all flex items-center gap-1.5">
+                        <span>Line Changes</span>
+                        <template x-if="sortBy === 'lines'">
+                            <svg class="w-3 h-3" :class="sortDirection === 'desc' ? '' : 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                            </svg>
+                        </template>
+                    </button>
+                    <button @click="setSortBy('files')" 
+                            :class="sortBy === 'files' ? 'bg-mongo-green/30 border-mongo-green/50 text-mongo-green' : 'bg-gray-700/50 border-gray-600 text-gray-300 hover:bg-gray-600'"
+                            class="px-3 py-1.5 border rounded-lg text-xs font-medium transition-all flex items-center gap-1.5">
+                        <span>Files Changed</span>
+                        <template x-if="sortBy === 'files'">
+                            <svg class="w-3 h-3" :class="sortDirection === 'desc' ? '' : 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                            </svg>
+                        </template>
+                    </button>
+                    <button @click="setSortBy('date')" 
+                            :class="sortBy === 'date' ? 'bg-mongo-green/30 border-mongo-green/50 text-mongo-green' : 'bg-gray-700/50 border-gray-600 text-gray-300 hover:bg-gray-600'"
+                            class="px-3 py-1.5 border rounded-lg text-xs font-medium transition-all flex items-center gap-1.5">
+                        <span>Date</span>
+                        <template x-if="sortBy === 'date'">
+                            <svg class="w-3 h-3" :class="sortDirection === 'desc' ? '' : 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                            </svg>
+                        </template>
+                    </button>
+                </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <!-- Repository Filter -->
+                <div>
+                    <label class="block text-xs font-semibold text-gray-400 mb-2">Repository</label>
+                    <input type="text" x-model="filters.repo" @input.debounce.500ms="applyFilters()" 
+                           placeholder="owner/repo or repo name" 
+                           class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-mongo-green"
+                           list="repo-list">
+                    <datalist id="repo-list">
+                        <template x-for="repo in getUniqueRepos()" :key="repo">
+                            <option :value="repo"></option>
+                        </template>
+                    </datalist>
+                </div>
+                
+                <!-- Role Filter -->
+                <div>
+                    <label class="block text-xs font-semibold text-gray-400 mb-2">Role</label>
+                    <select x-model="filters.role" @change="applyFilters()" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-mongo-green">
+                        <option value="">All Roles</option>
+                        <option value="author">Author</option>
+                        <option value="contributor">Contributor</option>
+                        <option value="reviewer">Reviewer</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Indicator with GIF -->
+        <template x-if="loading">
+            <div class="bg-gray-800/60 p-8 rounded-xl border border-gray-700 mb-6 flex flex-col items-center justify-center">
+                <div class="relative w-16 h-16 mb-4">
+                    <div class="absolute inset-0 border-4 border-mongo-green/30 rounded-full"></div>
+                    <div class="absolute inset-0 border-4 border-transparent border-t-mongo-green rounded-full animate-spin"></div>
+                </div>
+                <h3 class="text-lg font-bold text-white mb-2">Fetching PRs...</h3>
+                <p class="text-sm text-gray-400">Scraping GitHub for your pull requests</p>
+                <div class="mt-4 max-h-32 overflow-y-auto space-y-1 text-xs text-gray-500 font-mono w-full text-center">
+                    <template x-for="(msg, idx) in progress.slice(-5)" :key="idx">
+                        <div class="px-2 py-1" x-text="msg"></div>
+                    </template>
+                </div>
+            </div>
+        </template>
+
+        <!-- Merged PRs Section -->
+        <template x-if="show_merged && merged_prs.length > 0">
+            <div class="mb-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-bold text-purple-400 flex items-center gap-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        Merged PRs (<span x-text="merged_prs.length"></span>)
+                    </h2>
+                    <button @click="show_merged = false; updateStats();" class="text-xs text-gray-400 hover:text-gray-300">Hide</button>
+                </div>
+                <div class="space-y-3">
+                    <template x-for="pr in merged_prs" :key="`merged-${pr.repository.owner.login}/${pr.repository.name}#${pr.number}`">
+                        <div class="bg-gray-800/60 border border-purple-500/30 rounded-xl p-5 hover:border-purple-500/50 transition-all duration-200 hover:shadow-lg hover:shadow-purple-500/10">
+                            <div class="flex items-start justify-between gap-4">
+                                <div class="flex-1 min-w-0">
+                                    <!-- Header Row -->
+                                    <div class="flex items-start gap-3 mb-3">
+                                        <div class="flex-1 min-w-0">
+                                            <div class="flex items-center gap-2 mb-1 flex-wrap">
+                                                <a :href="pr.url" target="_blank" class="text-lg font-bold text-white hover:text-purple-400 transition-colors truncate" x-text="`${pr.repository.owner.login}/${pr.repository.name}#${pr.number}`"></a>
+                                                <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-bold bg-purple-500/10 text-purple-400 ring-purple-500/20 ring-1 ring-inset">MERGED</span>
+                                                <template x-if="pr.isDraft">
+                                                    <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-bold bg-gray-500/10 text-gray-400 ring-gray-500/20 ring-1 ring-inset">DRAFT</span>
+                                                </template>
+                                            </div>
+                                            <h3 class="text-white font-semibold mb-2 line-clamp-2" x-text="pr.title"></h3>
+                                        </div>
+                                    </div>
+
+                                    <!-- Metadata Row -->
+                                    <div class="flex flex-wrap items-center gap-4 text-sm text-gray-400 mb-3">
+                                        <div class="flex items-center gap-1">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                            </svg>
+                                            <span x-text="pr.author.login"></span>
+                                        </div>
+                                        <div class="flex items-center gap-1">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            <span x-text="pr.createdAt.substring(0, 10)"></span>
+                                        </div>
+                                        <template x-if="pr.changedFiles">
+                                            <div class="flex items-center gap-1">
+                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                                </svg>
+                                                <span x-text="`${pr.changedFiles} files`"></span>
+                                            </div>
+                                        </template>
+                                    </div>
+
+                                    <!-- Role Badges -->
+                                    <div class="flex flex-wrap items-center gap-2 mb-3">
+                                        <template x-for="role in (pr.user_role || [])" :key="role">
+                                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium"
+                                                  :class="{
+                                                      'bg-blue-500/20 text-blue-400 border border-blue-500/30': role === 'author',
+                                                      'bg-purple-500/20 text-purple-400 border border-purple-500/30': role === 'reviewer',
+                                                      'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30': role === 'contributor',
+                                                      'bg-gray-500/20 text-gray-400 border border-gray-500/30': role === 'commenter'
+                                                  }"
+                                                  x-text="role === 'author' ? '👤 Author' : role === 'reviewer' ? '👁️ Reviewer' : role === 'contributor' ? '💬 Contributor' : role === 'commenter' ? '💭 Commenter' : role"></span>
+                                        </template>
+                                    </div>
+                                </div>
+
+                                <!-- Quick Links & Actions -->
+                                <div class="flex flex-col gap-2 shrink-0">
+                                    <!-- Analyze Button -->
+                                    <a :href="`/repos/${pr.repository.owner.login}/${pr.repository.name}/prs/${pr.number}`" 
+                                       class="px-4 py-2 bg-mongo-green/20 hover:bg-mongo-green/30 text-mongo-green border border-mongo-green/50 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                        </svg>
+                                        Analyze
+                                    </a>
+                                    <a :href="`/repos/${pr.repository.owner.login}/${pr.repository.name}/prs/${pr.number}/comments`" 
+                                       class="px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/50 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                                        </svg>
+                                        View Comments
+                                    </a>
+                                    
+                                    <!-- Quick Links -->
+                                    <div class="flex flex-wrap gap-1.5">
+                                        <a :href="getPRLinks(pr).files" target="_blank" 
+                                           class="px-2.5 py-1.5 bg-gray-700/50 hover:bg-gray-600 text-white rounded text-xs font-medium transition-colors flex items-center gap-1"
+                                           title="View file changes">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                            </svg>
+                                            Files
+                                        </a>
+                                        <a :href="getPRLinks(pr).commits" target="_blank" 
+                                           class="px-2.5 py-1.5 bg-gray-700/50 hover:bg-gray-600 text-white rounded text-xs font-medium transition-colors flex items-center gap-1"
+                                           title="View commits">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                            </svg>
+                                            Commits
+                                        </a>
+                                        <a :href="pr.url" target="_blank" 
+                                           class="px-2.5 py-1.5 bg-gray-700/50 hover:bg-gray-600 text-white rounded text-xs font-medium transition-colors flex items-center gap-1"
+                                           title="View PR on GitHub">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
+                                            </svg>
+                                            PR
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </template>
+
+        <!-- Closed PRs Section -->
+        <template x-if="show_closed && closed_prs.length > 0">
+            <div class="mb-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-bold text-red-400 flex items-center gap-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                        Closed PRs (<span x-text="closed_prs.length"></span>)
+                    </h2>
+                    <button @click="show_closed = false; updateStats();" class="text-xs text-gray-400 hover:text-gray-300">Hide</button>
+                </div>
+                <div class="space-y-3">
+                    <template x-for="pr in closed_prs" :key="`closed-${pr.repository.owner.login}/${pr.repository.name}#${pr.number}`">
+                        <div class="bg-gray-800/60 border border-red-500/30 rounded-xl p-5 hover:border-red-500/50 transition-all duration-200 hover:shadow-lg hover:shadow-red-500/10">
+                            <div class="flex items-start justify-between gap-4">
+                                <div class="flex-1 min-w-0">
+                                    <!-- Header Row -->
+                                    <div class="flex items-start gap-3 mb-3">
+                                        <div class="flex-1 min-w-0">
+                                            <div class="flex items-center gap-2 mb-1 flex-wrap">
+                                                <a :href="pr.url" target="_blank" class="text-lg font-bold text-white hover:text-red-400 transition-colors truncate" x-text="`${pr.repository.owner.login}/${pr.repository.name}#${pr.number}`"></a>
+                                                <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-bold bg-red-500/10 text-red-400 ring-red-500/20 ring-1 ring-inset">CLOSED</span>
+                                                <template x-if="pr.isDraft">
+                                                    <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-bold bg-gray-500/10 text-gray-400 ring-gray-500/20 ring-1 ring-inset">DRAFT</span>
+                                                </template>
+                                            </div>
+                                            <h3 class="text-white font-semibold mb-2 line-clamp-2" x-text="pr.title"></h3>
+                                        </div>
+                                    </div>
+
+                                    <!-- Metadata Row -->
+                                    <div class="flex flex-wrap items-center gap-4 text-sm text-gray-400 mb-3">
+                                        <div class="flex items-center gap-1">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                            </svg>
+                                            <span x-text="pr.author.login"></span>
+                                        </div>
+                                        <div class="flex items-center gap-1">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            <span x-text="pr.createdAt.substring(0, 10)"></span>
+                                        </div>
+                                        <template x-if="pr.changedFiles">
+                                            <div class="flex items-center gap-1">
+                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                                </svg>
+                                                <span x-text="`${pr.changedFiles} files`"></span>
+                                            </div>
+                                        </template>
+                                        <template x-if="pr.additions && pr.deletions">
+                                            <div class="flex items-center gap-1">
+                                                <span class="text-green-400" x-text="`+${pr.additions}`"></span>
+                                                <span class="text-red-400" x-text="`-${pr.deletions}`"></span>
+                                            </div>
+                                        </template>
+                                    </div>
+
+                                    <!-- Role Badges -->
+                                    <div class="flex flex-wrap items-center gap-2 mb-3">
+                                        <template x-for="role in (pr.user_role || [])" :key="role">
+                                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium"
+                                                  :class="{
+                                                      'bg-blue-500/20 text-blue-400 border border-blue-500/30': role === 'author',
+                                                      'bg-purple-500/20 text-purple-400 border border-purple-500/30': role === 'reviewer',
+                                                      'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30': role === 'contributor',
+                                                      'bg-gray-500/20 text-gray-400 border border-gray-500/30': role === 'commenter'
+                                                  }"
+                                                  x-text="role === 'author' ? '👤 Author' : role === 'reviewer' ? '👁️ Reviewer' : role === 'contributor' ? '💬 Contributor' : role === 'commenter' ? '💭 Commenter' : role"></span>
+                                        </template>
+                                    </div>
+                                </div>
+
+                                <!-- Quick Links & Actions -->
+                                <div class="flex flex-col gap-2 shrink-0">
+                                    <!-- Analyze Button -->
+                                    <a :href="`/repos/${pr.repository.owner.login}/${pr.repository.name}/prs/${pr.number}`" 
+                                       class="px-4 py-2 bg-mongo-green/20 hover:bg-mongo-green/30 text-mongo-green border border-mongo-green/50 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                        </svg>
+                                        Analyze
+                                    </a>
+                                    <a :href="`/repos/${pr.repository.owner.login}/${pr.repository.name}/prs/${pr.number}/comments`" 
+                                       class="px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/50 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                                        </svg>
+                                        View Comments
+                                    </a>
+                                    
+                                    <!-- Quick Links -->
+                                    <div class="flex flex-wrap gap-1.5">
+                                        <a :href="getPRLinks(pr).files" target="_blank" 
+                                           class="px-2.5 py-1.5 bg-gray-700/50 hover:bg-gray-600 text-white rounded text-xs font-medium transition-colors flex items-center gap-1"
+                                           title="View file changes">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                            </svg>
+                                            Files
+                                        </a>
+                                        <a :href="getPRLinks(pr).commits" target="_blank" 
+                                           class="px-2.5 py-1.5 bg-gray-700/50 hover:bg-gray-600 text-white rounded text-xs font-medium transition-colors flex items-center gap-1"
+                                           title="View commits">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                            </svg>
+                                            Commits
+                                        </a>
+                                        <a :href="pr.url" target="_blank" 
+                                           class="px-2.5 py-1.5 bg-gray-700/50 hover:bg-gray-600 text-white rounded text-xs font-medium transition-colors flex items-center gap-1"
+                                           title="View PR on GitHub">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
+                                            </svg>
+                                            PR
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </template>
+
+        <!-- OPEN PRs List -->
+        <template x-if="!loading && prs.length > 0">
+        <div class="space-y-3">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-bold text-green-400 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+                    </svg>
+                    Open PRs (<span x-text="prs.length"></span>)
+                        <template x-if="!show_open">
+                            <span class="text-xs text-gray-500 ml-2">(hidden)</span>
+                        </template>
+                </h2>
+                    <button @click="toggleOpen()" 
+                            :class="show_open ? 'text-green-400 hover:text-green-300' : 'text-gray-500 hover:text-gray-400'"
+                            class="text-xs transition-colors flex items-center gap-1" 
+                            title="Toggle Open PRs visibility">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="show_open ? '' : 'rotate-180'">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                        </svg>
+                        <span x-text="show_open ? 'Hide' : 'Show'"></span>
+                    </button>
+                </div>
+                <template x-if="show_open">
+                <template x-for="pr in prs" :key="`${pr.repository.owner.login}/${pr.repository.name}#${pr.number}`">
+            <div class="bg-gray-800/60 border border-gray-700 rounded-xl p-5 hover:border-mongo-green/50 transition-all duration-200 hover:shadow-lg hover:shadow-mongo-green/10">
+                <div class="flex items-start justify-between gap-4">
+                    <div class="flex-1 min-w-0">
+                        <!-- Header Row -->
+                        <div class="flex items-start gap-3 mb-3">
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                                            <a :href="pr.url" target="_blank" class="text-lg font-bold text-white hover:text-mongo-green transition-colors truncate" x-text="`${pr.repository.owner.login}/${pr.repository.name}#${pr.number}`"></a>
+                                            <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-bold ring-1 ring-inset"
+                                                  :class="{
+                                                      'bg-green-500/10 text-green-400 ring-green-500/20': pr.state === 'OPEN',
+                                                      'bg-purple-500/10 text-purple-400 ring-purple-500/20': pr.state === 'MERGED',
+                                                      'bg-red-500/10 text-red-400 ring-red-500/20': pr.state === 'CLOSED'
+                                                  }"
+                                                  x-text="pr.state"></span>
+                                            <template x-if="pr.isDraft">
+                                                <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-bold bg-gray-500/10 text-gray-400 ring-gray-500/20 ring-1 ring-inset">DRAFT</span>
+                                            </template>
+                                </div>
+                                        <h3 class="text-white font-semibold mb-2 line-clamp-2" x-text="pr.title"></h3>
+                            </div>
+                        </div>
+
+                        <!-- Metadata Row -->
+                        <div class="flex flex-wrap items-center gap-4 text-sm text-gray-400 mb-3">
+                            <div class="flex items-center gap-1">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                </svg>
+                                        <span x-text="pr.author.login"></span>
+                            </div>
+                            <div class="flex items-center gap-1">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                        <span x-text="pr.createdAt.substring(0, 10)"></span>
+                            </div>
+                                    <template x-if="pr.changedFiles">
+                            <div class="flex items-center gap-1">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                            <span x-text="`${pr.changedFiles} files`"></span>
+                            </div>
+                                    </template>
+                                    <template x-if="pr.additions && pr.deletions">
+                            <div class="flex items-center gap-1">
+                                            <span class="text-green-400" x-text="`+${pr.additions}`"></span>
+                                            <span class="text-red-400" x-text="`-${pr.deletions}`"></span>
+                            </div>
+                                    </template>
+                        </div>
+
+                        <!-- Role Badges -->
+                        <div class="flex flex-wrap items-center gap-2 mb-3">
+                                    <template x-for="role in (pr.user_role || [])" :key="role">
+                                        <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium"
+                                              :class="{
+                                                  'bg-blue-500/20 text-blue-400 border border-blue-500/30': role === 'author',
+                                                  'bg-purple-500/20 text-purple-400 border border-purple-500/30': role === 'reviewer',
+                                                  'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30': role === 'contributor',
+                                                  'bg-gray-500/20 text-gray-400 border border-gray-500/30': role === 'commenter'
+                                              }"
+                                              x-text="role === 'author' ? '👤 Author' : role === 'reviewer' ? '👁️ Reviewer' : role === 'contributor' ? '💬 Contributor' : role === 'commenter' ? '💭 Commenter' : role"></span>
+                                    </template>
+                        </div>
+
+                        <!-- Activity Indicators -->
+                        <div class="flex items-center gap-4 text-xs text-gray-500">
+                                    <template x-if="pr.reviewThreads?.totalCount > 0">
+                            <div class="flex items-center gap-1">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586m0 0L11 14h4a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2v4l.586-.586z"></path>
+                                </svg>
+                                            <span :class="pr.reviewThreads.totalCount > 0 ? 'text-mongo-green font-bold' : ''" x-text="`${pr.reviewThreads.totalCount} threads`"></span>
+                            </div>
+                                    </template>
+                                    <template x-if="pr.comments?.totalCount > 0">
+                            <div class="flex items-center gap-1">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                                </svg>
+                                            <span x-text="`${pr.comments.totalCount} comments`"></span>
+                            </div>
+                                    </template>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="flex flex-col gap-2 shrink-0">
+                                <a :href="`/repos/${pr.repository.owner.login}/${pr.repository.name}/prs/${pr.number}`" 
+                           class="px-4 py-2 bg-mongo-green/20 hover:bg-mongo-green/30 text-mongo-green border border-mongo-green/50 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                            </svg>
+                            Analyze
+                        </a>
+                        <a :href="`/repos/${pr.repository.owner.login}/${pr.repository.name}/prs/${pr.number}/comments`" 
+                           class="px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/50 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                            </svg>
+                            View Comments
+                        </a>
+                                <a :href="pr.url" target="_blank" 
+                           class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 whitespace-nowrap">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
+                            </svg>
+                            GitHub
+                        </a>
+                    </div>
+                </div>
+            </div>
+                </template>
+                </template>
+                </template>
+        </div>
+        </template>
+
+        <!-- Pagination -->
+        <template x-if="!loading && show_open && page_info.hasNextPage">
+        <div class="mt-8 flex justify-center">
+                <button @click="current_cursor = page_info.endCursor; loadPRs();" 
+               class="bg-gray-800 hover:bg-gray-700 text-white font-bold py-3 px-8 rounded-full border border-gray-600 transition-all shadow-lg hover:shadow-mongo-green/20 flex items-center gap-2">
+                Load More PRs
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path>
+                </svg>
+                </button>
+        </div>
+        </template>
+
+        <!-- Empty State -->
+        <template x-if="!loading && show_open && prs.length === 0">
+        <div class="text-center py-16 bg-gray-900/30 rounded-xl border border-gray-800 border-dashed">
+            <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+            </svg>
+            <p class="text-gray-500 text-lg mb-2">No pull requests found</p>
+            <p class="text-gray-600 text-sm">Try changing the filter or check back later</p>
+        </div>
+        </template>
+            </div>
+        </div>
+
+        <!-- Modal Backdrop -->
+        <div class="modal-backdrop"
+             x-show="previewModal.open"
+             x-transition:enter="transition-opacity ease-out duration-300"
+             x-transition:enter-start="opacity-0"
+             x-transition:enter-end="opacity-100"
+             x-transition:leave="transition-opacity ease-in duration-200"
+             x-transition:leave-start="opacity-100"
+             x-transition:leave-end="opacity-0"
+             @click="closePreviewModal()"
+             @keydown.escape.window="closePreviewModal()">
+        </div>
+
+        <!-- Modal Container -->
+        <div class="modal-container"
+             x-show="previewModal.open"
+             x-transition:enter="transition ease-out duration-300"
+             x-transition:enter-start="opacity-0 scale-95"
+             x-transition:enter-end="opacity-100 scale-100"
+             x-transition:leave="transition ease-in duration-200"
+             x-transition:leave-start="opacity-100 scale-100"
+             x-transition:leave-end="opacity-0 scale-95"
+             @keydown.escape.window="closePreviewModal()">
+            
+            <div class="modal-dialog" @click.stop>
+                <!-- Modal Header -->
+                <div class="flex-shrink-0 bg-gray-900 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
+                    <div class="flex-1 min-w-0">
+                        <div :class="{ 'content-hidden': !previewModal.pr, 'content-visible': previewModal.pr }">
+                            <h2 class="text-2xl font-bold text-white mb-1 truncate" x-text="previewModal.pr?.title || ''"></h2>
+                            <p class="text-sm text-gray-400">
+                                <span x-text="previewModal.pr ? `${previewModal.pr.repository.owner.login}/${previewModal.pr.repository.name}#${previewModal.pr.number}` : ''"></span>
+                                <span class="ml-2"
+                                      :class="{ 'content-hidden': !previewModal.comments, 'content-visible': previewModal.comments }">
+                                    • <span x-text="previewModal.comments?.items?.length || 0"></span> items
+                                </span>
+                            </p>
+                        </div>
+                        <div :class="{ 'content-hidden': previewModal.pr, 'content-visible': !previewModal.pr }">
+                            <h2 class="text-2xl font-bold text-white mb-1">Loading Comments...</h2>
+                        </div>
+                    </div>
+                    <button @click="closePreviewModal()" 
+                            class="ml-4 p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors flex-shrink-0">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+                
+                <!-- Modal Content -->
+                <div class="flex-1 overflow-y-auto px-6 py-6" style="min-height: 0; max-height: calc(90vh - 120px);">
+                    <!-- Loading State -->
+                    <div class="flex flex-col items-center justify-center py-12"
+                         :class="{ 'content-hidden': !previewModal.loading, 'content-visible': previewModal.loading }">
+                        <div class="relative w-12 h-12 mb-4">
+                            <div class="absolute inset-0 border-4 border-mongo-green/30 rounded-full"></div>
+                            <div class="absolute inset-0 border-4 border-transparent border-t-mongo-green rounded-full animate-spin"></div>
+                        </div>
+                        <p class="text-gray-400">Loading comments...</p>
+                    </div>
+                    
+                    <!-- Error State -->
+                    <div class="bg-red-900/20 border border-red-700/50 text-red-200 px-4 py-3 rounded-lg"
+                         :class="{ 'content-hidden': !previewModal.error || previewModal.loading, 'content-visible': previewModal.error && !previewModal.loading }">
+                        <p x-text="previewModal.error"></p>
+                        <button @click="closePreviewModal()" class="mt-2 px-4 py-2 bg-red-700 hover:bg-red-600 text-white rounded-lg text-sm">
+                            Close
+                        </button>
+                    </div>
+                    
+                    <!-- Empty/Stuck State - Show when open but no content -->
+                    <div class="flex flex-col items-center justify-center py-12"
+                         :class="{ 'content-hidden': previewModal.loading || previewModal.error || previewModal.comments, 'content-visible': !previewModal.loading && !previewModal.error && !previewModal.comments && previewModal.open }">
+                        <p class="text-gray-400 mb-4">No content to display</p>
+                        <button @click="closePreviewModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm">
+                            Close Panel
+                        </button>
+                    </div>
+                    
+                    <!-- Comments Content -->
+                    <div class="max-w-4xl mx-auto space-y-4"
+                         :class="{ 'content-hidden': previewModal.loading || previewModal.error || !previewModal.comments, 'content-visible': !previewModal.loading && !previewModal.error && previewModal.comments }">
+                        <!-- PR Info Summary -->
+                        <div class="bg-gray-800/50 rounded-lg p-4 border border-gray-700 mb-4">
+                            <div class="flex items-center gap-4 text-sm text-gray-400">
+                                <div class="flex items-center gap-1">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                    </svg>
+                                    <span x-text="previewModal.comments?.author || 'Unknown'"></span>
+                                </div>
+                                <div class="flex items-center gap-1"
+                                     :class="{ 'content-hidden': !previewModal.comments?.items, 'content-visible': previewModal.comments?.items }">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                                    </svg>
+                                    <span x-text="previewModal.comments?.items ? `${previewModal.comments.items.length} comment${previewModal.comments.items.length !== 1 ? 's' : ''}` : ''"></span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Comments List -->
+                        <div class="space-y-4"
+                             :class="{ 'content-hidden': !previewModal.comments?.items || !Array.isArray(previewModal.comments.items) || previewModal.comments.items.length === 0, 'content-visible': previewModal.comments?.items && Array.isArray(previewModal.comments.items) && previewModal.comments.items.length > 0 }">
+                            <template x-for="(item, index) in (previewModal.comments?.items || [])" :key="item.id || `item-${index}`">
+                                <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-4 hover:border-gray-600 transition-colors">
+                                    <!-- Item Header -->
+                                    <div class="flex items-start justify-between mb-3">
+                                        <div class="flex-1">
+                                            <div class="flex items-center gap-2 mb-1">
+                                                <span class="text-sm font-semibold text-blue-400" 
+                                                      x-text="item.file || ''"
+                                                      :class="{ 'content-hidden': !item.file, 'content-visible': item.file }"></span>
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                                                      x-text="item.status || ''"
+                                                      :class="{
+                                                          'content-hidden': !item.status,
+                                                          'content-visible': item.status,
+                                                          'bg-green-500/20 text-green-400 border border-green-500/30': item.status === 'RESOLVED' || item.status === 'APPROVED',
+                                                          'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30': item.status === 'ACTIVE',
+                                                          'bg-red-500/20 text-red-400 border border-red-500/30': item.status === 'UNRESOLVED',
+                                                          'bg-gray-500/20 text-gray-400 border border-gray-500/30': item.status && !['RESOLVED', 'APPROVED', 'ACTIVE', 'UNRESOLVED'].includes(item.status)
+                                                      }"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Code Snippet -->
+                                    <div class="mb-3 bg-gray-900 rounded p-3 border border-gray-700 overflow-x-auto"
+                                         :class="{ 'content-hidden': !item.code_snippet, 'content-visible': item.code_snippet }">
+                                        <pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap" x-text="item.code_snippet || ''"></pre>
+                                    </div>
+                                    
+                                    <!-- Conversation -->
+                                    <div class="space-y-3"
+                                         :class="{ 'content-hidden': !item.conversation || !Array.isArray(item.conversation) || item.conversation.length === 0, 'content-visible': item.conversation && Array.isArray(item.conversation) && item.conversation.length > 0 }">
+                                        <template x-for="(msg, msgIndex) in (item.conversation || [])" :key="msgIndex">
+                                            <div class="bg-gray-900/50 rounded-lg p-3 border border-gray-700/50">
+                                                <div class="flex items-center gap-2 mb-2">
+                                                    <span class="text-sm font-semibold text-white" x-text="msg.author || 'Unknown'"></span>
+                                                    <span class="text-xs text-gray-500" 
+                                                          x-text="msg.timestamp ? formatDate(msg.timestamp) : ''"
+                                                          :class="{ 'content-hidden': !msg.timestamp, 'content-visible': msg.timestamp }"></span>
+                                                </div>
+                                                <div class="text-sm text-gray-300 whitespace-pre-wrap" x-html="(msg.text || '').replace(/\n/g, '<br>')"></div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                    
+                                    <!-- Fallback if no conversation -->
+                                    <p class="text-sm text-gray-500 italic"
+                                       :class="{ 'content-hidden': item.conversation && Array.isArray(item.conversation) && item.conversation.length > 0, 'content-visible': !item.conversation || !Array.isArray(item.conversation) || item.conversation.length === 0 }">
+                                        No conversation available
+                                    </p>
+                                </div>
+                            </template>
+                        </div>
+                        
+                        <!-- Empty State -->
+                        <div class="text-center py-12 text-gray-500"
+                             :class="{ 'content-hidden': previewModal.comments?.items && Array.isArray(previewModal.comments.items) && previewModal.comments.items.length > 0, 'content-visible': !previewModal.comments?.items || !Array.isArray(previewModal.comments.items) || previewModal.comments.items.length === 0 }">
+                            <svg class="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                            </svg>
+                            <p>No comments found for this PR</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Modal Footer -->
+                <div class="flex-shrink-0 bg-gray-900 border-t border-gray-700 px-6 py-4 flex items-center justify-end gap-3">
+                    <a :href="previewModal.pr?.url || '#'" target="_blank" 
+                       :class="{ 'content-hidden': !previewModal.pr, 'content-visible': previewModal.pr }"
+                       class="px-4 py-2 bg-mongo-green/20 hover:bg-mongo-green/30 text-mongo-green border border-mongo-green/50 rounded-lg text-sm font-medium transition-all flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
+                        </svg>
+                        View on GitHub
+                    </a>
+                    <a :href="previewModal.pr ? `/repos/${previewModal.pr.repository.owner.login}/${previewModal.pr.repository.name}/prs/${previewModal.pr.number}` : '#'" 
+                       :class="{ 'content-hidden': !previewModal.pr, 'content-visible': previewModal.pr }"
+                       class="px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/50 rounded-lg text-sm font-medium transition-all flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                        </svg>
+                        Full Analysis
+                    </a>
+                    <button @click="closePreviewModal()" 
+                            class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}
