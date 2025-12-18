@@ -15,6 +15,7 @@
 
 import os
 import json
+import re
 import asyncio
 import time
 import requests
@@ -84,13 +85,51 @@ class VectorStore:
         self.client = voyageai.Client(api_key=api_key)
         self.documents = [] 
         self.embeddings = [] 
-        self.metadata = [] 
+        self.metadata = []
+        self._cache = None  # Will be set via set_cache() method
+    
+    def set_cache(self, cache):
+        """Set the cache instance for embedding caching"""
+        self._cache = cache 
 
-    async def index_repo(self, root_dir: str, on_progress: Callable[[str], None] = None, include_paths: List[str] = None):
+    async def index_repo(self, root_dir: str, on_progress: Callable[[str], None] = None, 
+                        include_paths: List[str] = None, owner: str = None, repo: str = None,
+                        pr_number: int = None, commit_sha: str = None):
+        """
+        Index repository with optional caching.
+        
+        Args:
+            root_dir: Root directory to index
+            on_progress: Progress callback
+            include_paths: Optional list of paths to include
+            owner: Repository owner (for caching)
+            repo: Repository name (for caching)
+            pr_number: PR number (for caching)
+            commit_sha: Commit SHA (for caching)
+        """
+        # Check cache first if we have all required parameters
+        if self._cache and owner and repo and pr_number and commit_sha:
+            cached = self._cache.get_embeddings(owner, repo, pr_number, commit_sha, include_paths)
+            if cached:
+                if on_progress: on_progress("✅ Loading embeddings from cache...")
+                self.documents = cached.get("documents", [])
+                self.embeddings = cached.get("embeddings", np.array([]))
+                self.metadata = cached.get("metadata", [])
+                
+                stats = {
+                    "total_files": cached.get("total_files", 0),
+                    "total_chunks": len(self.documents)
+                }
+                if on_progress: on_progress(f"✅ Loaded {len(self.documents)} chunks from cache")
+                return stats
+        
         # Run the heavy indexing logic in a separate thread to keep the event loop responsive
-        return await asyncio.to_thread(self._index_repo_sync, root_dir, on_progress, include_paths)
+        return await asyncio.to_thread(self._index_repo_sync, root_dir, on_progress, include_paths, 
+                                       owner, repo, pr_number, commit_sha)
 
-    def _index_repo_sync(self, root_dir: str, on_progress: Callable[[str], None] = None, include_paths: List[str] = None):
+    def _index_repo_sync(self, root_dir: str, on_progress: Callable[[str], None] = None, 
+                         include_paths: List[str] = None, owner: str = None, repo: str = None,
+                         pr_number: int = None, commit_sha: str = None):
         if on_progress: on_progress("🔍 Scanning files for indexing...")
         print(f"🔍 Indexing repo at {root_dir}...")
         if include_paths:
@@ -194,6 +233,26 @@ class VectorStore:
         self.embeddings = np.array(all_embeddings)
         self.metadata = meta
         
+        # Store in cache if available
+        if self._cache and owner and repo and pr_number and commit_sha:
+            try:
+                self._cache.store_embeddings(
+                    owner, repo, pr_number, commit_sha,
+                    documents=chunks,
+                    embeddings=self.embeddings,
+                    metadata=meta,
+                    indexing_paths=include_paths
+                )
+                # Also store metadata
+                self._cache.store_embedding_metadata(
+                    owner, repo, pr_number, commit_sha,
+                    indexing_paths=include_paths,
+                    total_files=total_files,
+                    total_chunks=len(chunks)
+                )
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to cache embeddings: {e}")
+        
         stats = {"total_files": total_files, "total_chunks": len(chunks)}
         if on_progress: on_progress(f"✅ Indexing complete. ({total_files} files, {len(chunks)} chunks)")
         print("✅ Indexing complete.")
@@ -251,12 +310,31 @@ class SpecializedAnalysis(BaseModel):
     score: int = Field(..., description="Score 1-10 for this specific area")
     summary: str = Field(..., description="Brief summary of findings in this area")
 
+class Issue(BaseModel):
+    """A structured issue with description and suggested fix"""
+    description: str = Field(..., description="Specific issue description with file path and line reference. Format: 'In `file.py` around line X: [specific issue]. Impact: [what happens]'. Only include genuine bugs, security flaws, or architectural problems.")
+    file_path: str = Field(..., description="The file path where the issue exists (e.g., 'holly_api/api/routers/sa_sizing/apc/__init__.py')")
+    line_number: Optional[int] = Field(None, description="Approximate line number where the issue occurs")
+    severity: str = Field(..., description="Severity level: Critical, Important, or Medium")
+    suggested_fix: str = Field(..., description="A complete, copy-pasteable code snippet showing the suggested fix. Include enough context (imports, function signature, etc.) to make it immediately usable. Provide PURE CODE ONLY - NO markdown code fences (no ```python or ```).")
+    rationale: Optional[str] = Field(None, description="Brief explanation of why this fix is needed and what it improves")
+
+class Recommendation(BaseModel):
+    """A structured recommendation with code examples"""
+    description: str = Field(..., description="Actionable recommendation description with file path and line reference. Format: '[Severity] In `file.py` line X: [issue description]'")
+    file_path: str = Field(..., description="The file path where the recommendation applies (e.g., 'holly_api/api/models/sa_sizing.py')")
+    line_number: Optional[int] = Field(None, description="Approximate line number where the change should be made")
+    severity: str = Field(..., description="Severity level: Critical, Important, or Nitpick")
+    current_code: Optional[str] = Field(None, description="The current code snippet that needs improvement (if applicable). Provide PURE CODE ONLY - NO markdown code fences.")
+    suggested_code: str = Field(..., description="A complete, copy-pasteable code snippet showing the suggested improvement. Include enough context to make it immediately usable. Provide PURE CODE ONLY - NO markdown code fences (no ```python or ```).")
+    rationale: str = Field(..., description="Explanation of why this change matters and what it improves")
+
 class GeneralReview(BaseModel):
     summary: str = Field(..., description="A comprehensive executive summary (3-5 sentences) covering: what the PR accomplishes, overall code quality, key strengths, notable concerns, and merge readiness. Be specific and concrete.")
     overall_severity: str = Field(..., description="Overall risk level (Low, Medium, High). Low = ready to merge, Medium = needs minor fixes, High = significant issues.")
-    key_issues: List[str] = Field(..., description="List of specific issues with file paths and line references. Format: 'In `file.py` around line X: [specific issue]. Impact: [what happens]'. Only include genuine bugs, security flaws, or architectural problems.")
+    key_issues: List[Issue] = Field(..., description="List of specific issues with file paths, line references, and suggested fixes. Each issue must include a complete, copy-pasteable code snippet showing the fix. Only include genuine bugs, security flaws, or architectural problems.")
     code_quality_score: int = Field(..., description="A score from 1-10 rating the code quality. Must be justified in detailed_analysis with specific examples of what earns points and what prevents a perfect score.")
-    recommendations: List[str] = Field(..., description="Actionable recommendations with file paths, line numbers, code examples, and rationale. Format: '[Severity] In `file.py` line X: [issue]. Current: [code] → Suggested: [code]. Rationale: [why]'. Include at least 2-3 [Nitpick] suggestions.")
+    recommendations: List[Recommendation] = Field(..., description="Actionable recommendations with file paths, line numbers, current code (if applicable), suggested code snippets, and rationale. Each recommendation must include a complete, copy-pasteable code snippet. Include at least 2-3 Nitpick suggestions.")
     detailed_analysis: str = Field(..., description="Comprehensive technical analysis (500+ words) covering: specific code patterns observed (with file refs), comparison with existing codebase patterns, technical trade-offs, edge cases, performance implications, and explicit quality score justification explaining what earns points and what prevents a perfect score.")
     file_summaries: List[FileSummary] = Field(..., description="A concise (1-2 sentence) description for EACH modified file, focusing on WHAT changed and WHY it matters. Be specific about functionality, not generic.")
     specialized_analyses: List[SpecializedAnalysis] = Field(default=[], description="Results from parallel specialized analyses")
@@ -1994,20 +2072,37 @@ class AIReviewer:
            - Conclude with merge readiness assessment
         
         2. **Key Issues Detected**:
-           - Each issue MUST include: file path, approximate line number, specific problem description, and impact
-           - Format: "In `path/to/file.py` around line X: [specific issue]. Impact: [what happens]"
+           - Each issue MUST be a structured object with:
+             * description: "In `path/to/file.py` around line X: [specific issue]. Impact: [what happens]"
+             * file_path: The exact file path (e.g., "holly_api/api/routers/sa_sizing/apc/__init__.py")
+             * line_number: Approximate line number where the issue occurs
+             * severity: "Critical", "Important", or "Medium"
+             * suggested_fix: A COMPLETE, copy-pasteable code snippet showing the fix. Include:
+               - Function/class context if needed
+               - All necessary imports
+               - Proper indentation and syntax
+               - CRITICAL: Provide PURE CODE ONLY - NO markdown code fences (no ```python or ```)
+               - Example: from fastapi import APIRouter\n\n@router.get("/endpoint")\nasync def handler():\n    try:\n        # Fixed code here\n        pass\n    except Exception as e:\n        logger.error(f"Error: {{e}}")\n        raise
+             * rationale: Brief explanation of why this fix is needed
            - Only include genuine issues (bugs, security flaws, architectural problems)
-           - If no critical issues, state "No critical issues detected" rather than making up minor ones
+           - If no critical issues, return empty list rather than making up minor ones
         
-        3. **Recommendations** (MUST be actionable):
-           - EVERY recommendation must include:
-             * File path and line reference: "In `file.py` at line X"
-             * Current code snippet (if applicable)
-             * Suggested improvement with code example
-             * Rationale explaining why this matters
-           - Label severity: [Critical], [Important], or [Nitpick]
-           - Include at least 2-3 [Nitpick] suggestions for minor improvements (naming, comments, formatting)
-           - Example format: "[Nitpick] In `tools.py` line 45: Consider adding a docstring. Current: `def process_data():` → Suggested: `def process_data():\n    \"\"\"Processes input data and returns normalized output.\"\"\"`"
+        3. **Recommendations** (MUST be actionable with copy-pasteable code):
+           - EVERY recommendation must be a structured object with:
+             * description: "[Severity] In `file.py` line X: [issue description]"
+             * file_path: The exact file path
+             * line_number: Approximate line number
+             * severity: "Critical", "Important", or "Nitpick"
+             * current_code: The current code snippet that needs improvement (if applicable)
+             * suggested_code: A COMPLETE, copy-pasteable code snippet showing the improvement. Include:
+               - Full function/class if context is needed
+               - All necessary imports
+               - Proper indentation and syntax
+               - CRITICAL: Provide PURE CODE ONLY - NO markdown code fences (no ```python or ```)
+               - Example: from typing import Optional\n\ndef process_data(data: Optional[dict] = None) -> dict:\n    \"\"\"Processes input data and returns normalized output.\"\"\"\n    if data is None:\n        data = {{}}\n    # ... rest of function
+             * rationale: Explanation of why this change matters
+           - Include at least 2-3 "Nitpick" suggestions for minor improvements (naming, comments, formatting)
+           - CRITICAL: All code snippets must be complete and immediately usable - include imports, function signatures, and proper context
         
         4. **File Change Analysis**:
            - Provide a concise (1-2 sentence) description for EACH modified file
@@ -2038,12 +2133,14 @@ class AIReviewer:
         
         CRITICAL: 
         - Every claim must be backed by specific code references (file + line)
-        - Every recommendation must include a code example
-        - Never use vague language like "consider improving X" without showing HOW
+        - Every issue MUST include a complete, copy-pasteable code snippet showing the fix
+        - Every recommendation MUST include a complete, copy-pasteable code snippet showing the improvement
+        - Code snippets must be COMPLETE and USABLE - include imports, function signatures, proper indentation
+        - Never use vague language like "consider improving X" without showing HOW with actual code
         - If code follows existing patterns well, explicitly praise it with examples
         - Be thorough but pragmatic - don't block on minor style issues
         
-        Provide a structured, actionable review that a developer can immediately act upon.
+        Provide a structured, actionable review that a developer can immediately act upon by copying and pasting the provided code snippets.
         """
         
         try:
@@ -2064,22 +2161,125 @@ class AIReviewer:
                 # Enhance key_issues with critical issues from specialized analyses
                 if all_critical_issues:
                     existing_issues = list(review_result.key_issues) if hasattr(review_result, 'key_issues') else []
-                    # Add unique critical issues
-                    for issue in all_critical_issues[:5]:  # Limit to top 5
-                        if issue not in existing_issues:
-                            existing_issues.append(issue)
+                    # Convert string issues to Issue objects if needed (backward compatibility)
+                    for issue_text in all_critical_issues[:5]:  # Limit to top 5
+                        # Check if it's already an Issue object
+                        if isinstance(issue_text, Issue):
+                            if issue_text not in existing_issues:
+                                existing_issues.append(issue_text)
+                        else:
+                            # Convert string to Issue object
+                            # Try to extract file path from the issue text
+                            file_match = re.search(r'`([^`]+\.py)`', issue_text)
+                            file_path = file_match.group(1) if file_match else "unknown"
+                            line_match = re.search(r'line\s+(\d+)', issue_text)
+                            line_num = int(line_match.group(1)) if line_match else None
+                            
+                            new_issue = Issue(
+                                description=issue_text,
+                                file_path=file_path,
+                                line_number=line_num,
+                                severity="Critical",
+                                suggested_fix="# TODO: Review and implement fix based on specialized analysis",
+                                rationale="Identified by specialized analysis"
+                            )
+                            # Check if description already exists
+                            if not any(iss.description == issue_text for iss in existing_issues):
+                                existing_issues.append(new_issue)
                     review_result.key_issues = existing_issues
                 
                 # Enhance recommendations with specialized recommendations
                 existing_recs = list(review_result.recommendations) if hasattr(review_result, 'recommendations') else []
                 for spec in valid_specialized:
-                    for rec in spec.recommendations[:2]:  # Top 2 per area
-                        rec_with_tag = f"[{spec.focus_area}] {rec}"
-                        if rec_with_tag not in existing_recs:
-                            existing_recs.append(rec_with_tag)
+                    for rec_text in spec.recommendations[:2]:  # Top 2 per area
+                        rec_with_tag = f"[{spec.focus_area}] {rec_text}"
+                        # Check if it's already a Recommendation object
+                        if isinstance(rec_text, Recommendation):
+                            if rec_text not in existing_recs:
+                                existing_recs.append(rec_text)
+                        else:
+                            # Convert string to Recommendation object
+                            file_match = re.search(r'`([^`]+\.py)`', rec_text)
+                            file_path = file_match.group(1) if file_match else "unknown"
+                            line_match = re.search(r'line\s+(\d+)', rec_text)
+                            line_num = int(line_match.group(1)) if line_match else None
+                            severity_match = re.search(r'\[(Critical|Important|Nitpick)\]', rec_text)
+                            severity = severity_match.group(1) if severity_match else "Important"
+                            
+                            new_rec = Recommendation(
+                                description=rec_with_tag,
+                                file_path=file_path,
+                                line_number=line_num,
+                                severity=severity,
+                                current_code=None,
+                                suggested_code="# TODO: Review and implement recommendation based on specialized analysis",
+                                rationale="Identified by specialized analysis"
+                            )
+                            # Check if description already exists
+                            if not any(rec.description == rec_with_tag for rec in existing_recs):
+                                existing_recs.append(new_rec)
                 review_result.recommendations = existing_recs
             
-            return {
+            # Helper function to strip markdown code fences from code snippets
+            def strip_code_fences(code: str) -> str:
+                """Remove markdown code fences (```python, ```, etc.) from code snippets"""
+                if not code or not isinstance(code, str):
+                    return code
+                # Remove leading/trailing whitespace
+                code = code.strip()
+                # Remove markdown code fences at start (```python, ```py, ```, etc.)
+                # Match: ``` followed by optional language identifier and optional newline
+                code = re.sub(r'^```[a-z]*\s*\n?', '', code, flags=re.MULTILINE | re.IGNORECASE)
+                # Remove markdown code fences at end (``` with optional whitespace/newlines)
+                code = re.sub(r'\n?```\s*$', '', code, flags=re.MULTILINE)
+                return code.strip()
+            
+            # Convert Pydantic model to dict for serialization (after all modifications)
+            # Fast, simple conversion - Pydantic models should serialize easily
+            try:
+                # Try Pydantic v2 first (most common)
+                if hasattr(review_result, 'model_dump'):
+                    review_result_dict = review_result.model_dump()
+                # Fallback to Pydantic v1
+                elif hasattr(review_result, 'dict'):
+                    review_result_dict = review_result.dict()
+                # Last resort: JSON round-trip (slower but reliable)
+                elif hasattr(review_result, 'json'):
+                    import json
+                    review_result_dict = json.loads(review_result.json())
+                else:
+                    # Shouldn't happen, but handle gracefully
+                    raise ValueError("review_result is not a Pydantic model")
+                    
+            except Exception as e:
+                print(f"❌ Error converting review_result to dict: {e}")
+                import traceback
+                error_trace = traceback.format_exc()
+                print(f"❌ Full traceback:\n{error_trace}")
+                if on_progress:
+                    on_progress(f"❌ Serialization error: {str(e)}")
+                # Re-raise to be caught by outer exception handler
+                raise
+            
+            # Clean up code snippets: strip markdown code fences
+            if isinstance(review_result_dict, dict):
+                # Clean suggested_fix in key_issues
+                if 'key_issues' in review_result_dict:
+                    for issue in review_result_dict.get('key_issues', []):
+                        if isinstance(issue, dict) and 'suggested_fix' in issue:
+                            issue['suggested_fix'] = strip_code_fences(issue['suggested_fix'])
+                
+                # Clean current_code and suggested_code in recommendations
+                if 'recommendations' in review_result_dict:
+                    for rec in review_result_dict.get('recommendations', []):
+                        if isinstance(rec, dict):
+                            if 'current_code' in rec and rec['current_code']:
+                                rec['current_code'] = strip_code_fences(rec['current_code'])
+                            if 'suggested_code' in rec:
+                                rec['suggested_code'] = strip_code_fences(rec['suggested_code'])
+            
+            # Debug: Log what we're returning
+            result_dict = {
                 "id": "general-review",
                 "file": "General Review",
                 "status": "COMPLETED",
@@ -2087,12 +2287,29 @@ class AIReviewer:
                 "rag_sources": rag_sources,
                 "pr_files": pr_files,  # Files changed in the PR
                 "indexing_paths": indexing_paths,  # Paths used for vector indexing
-                "ai_analysis": review_result,
+                "ai_analysis": review_result_dict,
                 "specialized_analyses": valid_specialized
             }
             
+            # Validate the result before returning
+            if not review_result_dict:
+                print(f"⚠️ WARNING: review_result_dict is empty!")
+                if on_progress:
+                    on_progress("⚠️ Warning: Review result dict is empty")
+            
+            print(f"✅ Returning result: id={result_dict.get('id')}, ai_analysis keys={list(review_result_dict.keys()) if isinstance(review_result_dict, dict) else 'N/A'}")
+            if on_progress:
+                on_progress(f"✅ Review completed successfully")
+            
+            return result_dict
+            
         except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
             print(f"❌ Error in General Review: {e}")
+            print(f"❌ Full traceback:\n{error_trace}")
+            if on_progress:
+                on_progress(f"❌ Error: {str(e)}")
             return None
 
     async def analyze_batch(self, threads, sandbox_dir: str, custom_prompt: str = None, retriever: VectorStore = None, on_progress: Callable[[str], None] = None):

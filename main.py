@@ -16,6 +16,9 @@
 import os
 import json
 import asyncio
+import logging
+import copy
+import re
 from typing import List, Optional, Dict
 from urllib.parse import quote
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
@@ -23,6 +26,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 from services import GitHubFetcher, AIReviewer, git_sandbox, VectorStore
+from cache import IntelligentCache
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -39,7 +45,136 @@ def urlencode_path(path: str) -> str:
     encoded_segments = [quote(segment, safe='') for segment in segments]
     return '/'.join(encoded_segments)
 
+def render_markdown(text: str) -> str:
+    """Convert markdown text to HTML with proper formatting"""
+    if not text:
+        return ""
+    
+    import html
+    
+    # First, convert literal \n to actual newlines
+    text = text.replace('\\n', '\n')
+    
+    # Store and replace code blocks first (before any processing)
+    code_block_placeholders = []
+    def store_code_block(match):
+        idx = len(code_block_placeholders)
+        code_block_placeholders.append(match.group(0))
+        return f'__CODE_BLOCK_{idx}__'
+    text = re.sub(r'```[\s\S]*?```', store_code_block, text)
+    
+    # Process line by line for structure (headers, lists, paragraphs)
+    lines = text.split('\n')
+    result_lines = []
+    in_list = False
+    list_type = None
+    current_paragraph = []
+    
+    def process_inline_markdown(text: str) -> str:
+        """Process inline markdown (bold, code) in text"""
+        # Escape HTML first
+        text = html.escape(text)
+        # Bold text **text** or __text__
+        text = re.sub(r'\*\*(.*?)\*\*', r'<strong class="font-bold text-white">\1</strong>', text)
+        text = re.sub(r'__(.*?)__', r'<strong class="font-bold text-white">\1</strong>', text)
+        # Inline code `code`
+        text = re.sub(r'`([^`]+?)`', r'<code class="bg-gray-800 px-1.5 py-0.5 rounded text-xs font-mono text-green-400">\1</code>', text)
+        return text
+    
+    def flush_paragraph():
+        nonlocal current_paragraph
+        if current_paragraph:
+            para_text = ' '.join(current_paragraph)
+            if para_text.strip():
+                processed_text = process_inline_markdown(para_text)
+                result_lines.append(f'<p class="mb-3">{processed_text}</p>')
+            current_paragraph = []
+    
+    def flush_list():
+        nonlocal in_list, list_type
+        if in_list:
+            tag = '</ol>' if list_type == 'ordered' else '</ul>'
+            result_lines.append(tag)
+            in_list = False
+            list_type = None
+    
+    for line in lines:
+        # Headers
+        if re.match(r'^###\s+(.+)$', line):
+            flush_paragraph()
+            flush_list()
+            header_text = re.sub(r'^###\s+', '', line)
+            result_lines.append(f'<h3 class="text-lg font-bold text-white mt-4 mb-2">{process_inline_markdown(header_text)}</h3>')
+            continue
+        elif re.match(r'^##\s+(.+)$', line):
+            flush_paragraph()
+            flush_list()
+            header_text = re.sub(r'^##\s+', '', line)
+            result_lines.append(f'<h2 class="text-xl font-bold text-white mt-5 mb-3">{process_inline_markdown(header_text)}</h2>')
+            continue
+        elif re.match(r'^#\s+(.+)$', line):
+            flush_paragraph()
+            flush_list()
+            header_text = re.sub(r'^#\s+', '', line)
+            result_lines.append(f'<h1 class="text-2xl font-bold text-white mt-6 mb-4">{process_inline_markdown(header_text)}</h1>')
+            continue
+        
+        # Lists
+        if re.match(r'^\s*[-*]\s+', line):
+            flush_paragraph()
+            if not in_list or list_type != 'unordered':
+                flush_list()
+                result_lines.append('<ul class="list-disc list-inside space-y-1 my-2 ml-4">')
+                in_list = True
+                list_type = 'unordered'
+            content = re.sub(r'^\s*[-*]\s+', '', line)
+            result_lines.append(f'<li class="mb-1">{process_inline_markdown(content)}</li>')
+            continue
+        elif re.match(r'^\s*\d+\.\s+', line):
+            flush_paragraph()
+            if not in_list or list_type != 'ordered':
+                flush_list()
+                result_lines.append('<ol class="list-decimal list-inside space-y-1 my-2 ml-4">')
+                in_list = True
+                list_type = 'ordered'
+            content = re.sub(r'^\s*\d+\.\s+', '', line)
+            result_lines.append(f'<li class="mb-1">{process_inline_markdown(content)}</li>')
+            continue
+        
+        # Empty line
+        if not line.strip():
+            flush_paragraph()
+            flush_list()
+            continue
+        
+        # Regular paragraph line
+        flush_list()
+        current_paragraph.append(line)
+    
+    # Flush any remaining content
+    flush_paragraph()
+    flush_list()
+    
+    text = '\n'.join(result_lines)
+    
+    # Restore code blocks and process them
+    for idx, code_block in enumerate(code_block_placeholders):
+        placeholder = f'__CODE_BLOCK_{idx}__'
+        if placeholder in text:
+            # Extract language and code
+            lang_match = re.match(r'```(\w+)?', code_block)
+            language = lang_match.group(1) if lang_match else ''
+            code = re.sub(r'```\w*\n?', '', code_block)
+            code = re.sub(r'```$', '', code).strip()
+            code_escaped = html.escape(code)
+            lang_class = f'language-{language}' if language else ''
+            code_html = f'<pre class="bg-gray-900 rounded-lg p-4 border border-gray-700 overflow-x-auto my-4"><code class="text-xs font-mono text-gray-300 {lang_class}">{code_escaped}</code></pre>'
+            text = text.replace(placeholder, code_html)
+    
+    return text
+
 templates.env.filters['urlencode_path'] = urlencode_path
+templates.env.filters['markdown'] = render_markdown
 
 # In-memory store for active progress logs (client_id -> queue)
 active_connections: Dict[str, asyncio.Queue] = {}
@@ -86,6 +221,17 @@ def get_vector_store():
         print("⚠️ VOYAGE_API_KEY not set. Semantic search will be disabled.")
         return None
     return VectorStore(voyage_key)
+
+# Initialize intelligent cache (MongoDB if available, in-memory otherwise)
+_cache_instance: Optional[IntelligentCache] = None
+
+def get_cache() -> IntelligentCache:
+    """Get or create the cache instance"""
+    global _cache_instance
+    if _cache_instance is None:
+        _cache_instance = IntelligentCache()
+        logger.info(f"✅ Cache initialized: {'MongoDB' if _cache_instance._use_mongo else 'In-memory'}")
+    return _cache_instance
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(
@@ -633,9 +779,65 @@ async def stream_analysis_job(
         async def worker():
             try:
                 token = os.getenv("GITHUB_TOKEN")
+                cache = get_cache()  # Get cache once at the start
                 
                 if job_data.get('review_type') == 'general':
                     # --- GENERAL REVIEW ---
+                    
+                    # Get PR head commit SHA for file links (more reliable than branch name)
+                    pr_data = fetcher.get_pr_threads(job_data['owner'], job_data['repo'], job_data['pr_number'])
+                    head_commit_sha = pr_data.get("headRefOid", "") if pr_data else ""
+                    head_ref = pr_data.get("headRefName", "main") if pr_data else "main"
+                    
+                    # Check cache first - CRITICAL for performance!
+                    if head_commit_sha:
+                        on_progress(f"🔍 Checking cache for commit {head_commit_sha[:8]}...")
+                        logger.info(f"🔍 Checking cache for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}@{head_commit_sha[:8]}")
+                        cached_review = cache.get_general_review(
+                            job_data['owner'], 
+                            job_data['repo'], 
+                            job_data['pr_number'], 
+                            head_commit_sha
+                        )
+                        if cached_review:
+                            on_progress(f"✅ Cache hit! Loading cached review...")
+                            logger.info(f"✅ Cache hit for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}@{head_commit_sha[:8]}")
+                            review_id = f"{job_id}-general-review"
+                            # Create a copy and add job-specific id
+                            cached_review = cached_review.copy()
+                            cached_review['id'] = review_id
+                            
+                            # Store in in-memory for follow-up questions
+                            pr_files = fetcher.get_pr_files(job_data['owner'], job_data['repo'], job_data['pr_number'])
+                            general_reviews[review_id] = {
+                                "review_result": cached_review,
+                                "owner": job_data['owner'],
+                                "repo": job_data['repo'],
+                                "pr_number": job_data['pr_number'],
+                                "pr_files": pr_files,
+                                "indexing_paths": job_data.get('indexing_paths')
+                            }
+                            
+                            # Render HTML partial
+                            html_content = templates.get_template("partials/general_result.html").render(
+                                res=cached_review,
+                                owner=job_data['owner'],
+                                repo=job_data['repo'],
+                                pr_number=job_data['pr_number'],
+                                head_ref=head_ref,
+                                head_commit_sha=head_commit_sha
+                            )
+                            payload = {
+                                "id": review_id,
+                                "file": cached_review.get('file', 'General Review'),
+                                "status": cached_review.get('status', 'COMPLETED'),
+                                "html": html_content
+                            }
+                            queue.put_nowait({"type": "result", "payload": payload})
+                            on_progress("✅ General Review Complete (from cache)")
+                            queue.put_nowait({"type": "done"})
+                            return
+                    
                     on_progress("📋 Step 1/4: Fetching PR modified files...")
                     
                     # GUARDRAIL: Check for large PRs
@@ -655,28 +857,34 @@ async def stream_analysis_job(
                         queue.put_nowait({"type": "error", "msg": "No modified files found in this PR."})
                         return
                     
-                    # Get PR head commit SHA for file links (more reliable than branch name)
-                    pr_data = fetcher.get_pr_threads(job_data['owner'], job_data['repo'], job_data['pr_number'])
-                    head_commit_sha = pr_data.get("headRefOid", "") if pr_data else ""
-                    head_ref = pr_data.get("headRefName", "main") if pr_data else "main"
-                    
                     on_progress(f"✓ Found {len(pr_files)} modified files")
 
                     async with git_sandbox(job_data['owner'], job_data['repo'], token, pr_number=job_data['pr_number'], on_progress=on_progress) as sandbox_dir:
                         # Setup Vector Store & Indexing for codebase context
                         vector_store = get_vector_store()
                         if vector_store:
+                            # Pass cache to vector store for embedding caching
+                            vector_store.set_cache(cache)
                             on_progress("📚 Step 2/4: Indexing codebase for context (this may take 30-60 seconds)...")
-                            stats = await vector_store.index_repo(sandbox_dir, include_paths=job_data.get('indexing_paths'), on_progress=on_progress)
+                            stats = await vector_store.index_repo(
+                                sandbox_dir, 
+                                include_paths=job_data.get('indexing_paths'), 
+                                on_progress=on_progress,
+                                owner=job_data['owner'],
+                                repo=job_data['repo'],
+                                pr_number=job_data['pr_number'],
+                                commit_sha=head_commit_sha
+                            )
                             queue.put_nowait({"type": "indexed", "stats": stats})
                             on_progress(f"✓ Indexed {stats.get('total_files', 0)} files")
                         
                         on_progress("🔬 Step 3/4: Launching parallel specialized analyses (5 AI agents)...")
                         
+                        # General review doesn't use custom_prompt - it's a comprehensive review
                         result = await reviewer.general_pr_review(
                             pr_files, 
                             sandbox_dir, 
-                            job_data.get('custom_prompt'),
+                            custom_prompt=None,  # General review is always comprehensive
                             retriever=vector_store,
                             indexing_paths=job_data.get('indexing_paths'),
                             on_progress=on_progress
@@ -684,11 +892,70 @@ async def stream_analysis_job(
                         
                         on_progress("📊 Step 4/4: Finalizing review report...")
                         
-                        if result:
-                            # Store review data for follow-up questions
+                        # Debug: Log result details
+                        if result is not None:
+                            logger.info(f"🔍 RESULT DEBUG: result type={type(result)}, is_dict={isinstance(result, dict)}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                            print(f"🔍 RESULT DEBUG: result type={type(result)}, is_dict={isinstance(result, dict)}")
+                            if isinstance(result, dict):
+                                print(f"🔍 RESULT DEBUG: result keys={list(result.keys())}")
+                                print(f"🔍 RESULT DEBUG: result['ai_analysis'] type={type(result.get('ai_analysis'))}")
+                        else:
+                            logger.warning(f"⚠️ RESULT DEBUG: result is None")
+                            print(f"⚠️ RESULT DEBUG: result is None")
+                        
+                        if result and isinstance(result, dict) and result.get('ai_analysis'):
+                            # IMPORTANT: Store in cache BEFORE modifying result
+                            # Cache the original result structure with deep copy
+                            logger.info(f"🔍 CACHE DEBUG: result is not None, head_commit_sha={head_commit_sha[:8] if head_commit_sha else 'EMPTY'}")
+                            if head_commit_sha:
+                                try:
+                                    # Deep copy to avoid mutating nested structures
+                                    cache_result = copy.deepcopy(result)
+                                    logger.info(f"💾 CACHE: Preparing to cache: commit_sha={head_commit_sha[:8]}, result_keys={list(result.keys()) if isinstance(result, dict) else 'NOT_DICT'}")
+                                    print(f"💾 CACHE: Attempting to cache review for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}@{head_commit_sha[:8]}")
+                                    
+                                    cache_success = cache.store_general_review(
+                                        job_data['owner'],
+                                        job_data['repo'],
+                                        job_data['pr_number'],
+                                        head_commit_sha,
+                                        cache_result,  # Store original result
+                                        metadata={
+                                            "indexing_paths": job_data.get('indexing_paths')
+                                        }
+                                    )
+                                    
+                                    print(f"💾 CACHE: store_general_review returned: {cache_success}")
+                                    logger.info(f"💾 CACHE: store_general_review returned: {cache_success}")
+                                    
+                                    if cache_success:
+                                        on_progress(f"💾 Cached review for commit {head_commit_sha[:8]}")
+                                        logger.info(f"✅ Successfully cached general review for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}@{head_commit_sha[:8]}")
+                                        print(f"✅ CACHE SUCCESS: {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}@{head_commit_sha[:8]}")
+                                    else:
+                                        on_progress(f"⚠️ Warning: Failed to cache review (cache may be unavailable)")
+                                        logger.error(f"❌ CACHE FAILED: Failed to cache review for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}")
+                                        print(f"❌ CACHE FAILED: {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}")
+                                except Exception as e:
+                                    import traceback
+                                    logger.error(f"❌ CACHE EXCEPTION: {e}\n{traceback.format_exc()}")
+                                    print(f"❌ CACHE EXCEPTION: {e}")
+                                    on_progress(f"⚠️ Warning: Exception while caching review: {e}")
+                            else:
+                                on_progress(f"⚠️ Warning: No commit SHA available, review not cached")
+                                logger.warning(f"⚠️ Cannot cache review: head_commit_sha is empty for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}")
+                                print(f"⚠️ CACHE SKIP: No commit SHA for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}")
+                        else:
+                            logger.warning(f"⚠️ CACHE SKIP: result is None/empty for {job_data['owner']}/{job_data['repo']}#{job_data['pr_number']}")
+                            print(f"⚠️ CACHE SKIP: result is None or empty")
+                            if result is not None:
+                                print(f"⚠️ CACHE SKIP DEBUG: result type={type(result)}, value={result}")
+                        
+                        # Store review data for follow-up questions (only if result exists)
+                        if result and isinstance(result, dict) and result.get('ai_analysis'):
                             review_id = f"{job_id}-general-review"
                             
-                            # Update result id to match review_id for template rendering
+                            # Update result id to match review_id for template rendering (after caching)
                             result['id'] = review_id
                             
                             general_reviews[review_id] = {
@@ -720,10 +987,15 @@ async def stream_analysis_job(
                             queue.put_nowait({"type": "result", "payload": payload})
                             on_progress("✅ General Review Complete")
                         else:
-                            queue.put_nowait({"type": "error", "msg": "AI Review failed."})
+                            # Try to get more details about why it failed
+                            error_msg = "AI Review failed. Check server logs for details."
+                            queue.put_nowait({"type": "error", "msg": error_msg})
+                            on_progress("❌ Review returned no results. Check logs for error details.")
 
                 else:
                     # --- COMMENT/THREAD ANALYSIS ---
+                    cache = get_cache()
+                    
                     # 1. Fetch All Comments
                     on_progress("🔍 Fetching all PR comments...")
                     # Update: get_pr_threads now returns a dict {items, headRefName, title, author}
@@ -734,6 +1006,7 @@ async def stream_analysis_job(
                         
                     all_items = pr_data.get("items", [])
                     head_ref = pr_data.get("headRefName", "main")
+                    head_commit_sha = pr_data.get("headRefOid", "") if pr_data else ""
                     
                     # 2. Filter by selected IDs
                     selected_ids = set(job_data.get('selected_threads', []))
@@ -743,40 +1016,114 @@ async def stream_analysis_job(
                         queue.put_nowait({"type": "error", "msg": "No comments/threads selected"})
                         return
 
-                    # 3. Setup Sandbox & Indexing
+                    # Check cache for thread analyses
+                    cached_results = []
+                    uncached_items = []
+                    if head_commit_sha:
+                        for item in items_to_analyze:
+                            thread_id = item.get("id")
+                            cached = cache.get_thread_analysis(
+                                job_data['owner'], 
+                                job_data['repo'], 
+                                job_data['pr_number'], 
+                                head_commit_sha,
+                                thread_id
+                            )
+                            if cached:
+                                cached_results.append(cached)
+                                on_progress(f"✅ Loaded cached analysis for {item.get('file_path', 'comment')}")
+                            else:
+                                uncached_items.append(item)
+                    else:
+                        uncached_items = items_to_analyze
+
+                    # 3. Setup Sandbox & Indexing (only if we have uncached items)
                     vector_store = get_vector_store()
+                    results_list = cached_results.copy()
                     
-                    async with git_sandbox(job_data['owner'], job_data['repo'], token, pr_number=job_data['pr_number'], on_progress=on_progress) as sandbox_dir:
-                        if vector_store:
-                            stats = await vector_store.index_repo(sandbox_dir, include_paths=job_data['indexing_paths'], on_progress=on_progress)
-                            queue.put_nowait({"type": "indexed", "stats": stats})
+                    if uncached_items:
+                        async with git_sandbox(job_data['owner'], job_data['repo'], token, pr_number=job_data['pr_number'], on_progress=on_progress) as sandbox_dir:
+                            if vector_store:
+                                # Pass cache to vector store for embedding caching
+                                vector_store.set_cache(cache)
+                                stats = await vector_store.index_repo(
+                                    sandbox_dir, 
+                                    include_paths=job_data['indexing_paths'], 
+                                    on_progress=on_progress,
+                                    owner=job_data['owner'],
+                                    repo=job_data['repo'],
+                                    pr_number=job_data['pr_number'],
+                                    commit_sha=head_commit_sha
+                                )
+                                queue.put_nowait({"type": "indexed", "stats": stats})
+                            
+                            on_progress("🚀 Launching AI Agents...")
+                            
+                            # 4. Run Analysis in Parallel for uncached items
+                            tasks = [
+                                reviewer.analyze_thread(item, sandbox_dir, job_data.get('custom_prompt'), retriever=vector_store) 
+                                for item in uncached_items
+                            ]
+                            
+                            for future in asyncio.as_completed(tasks):
+                                result = await future
+                                if result:
+                                    results_list.append(result)
+                                    
+                                    # Store in cache
+                                    if head_commit_sha:
+                                        thread_id = result.get('id', '')
+                                        # Find the original item to get thread_id
+                                        for item in uncached_items:
+                                            if item.get('id') == thread_id or result.get('file') == item.get('file_path'):
+                                                cache.store_thread_analysis(
+                                                    job_data['owner'],
+                                                    job_data['repo'],
+                                                    job_data['pr_number'],
+                                                    head_commit_sha,
+                                                    item.get('id', thread_id),
+                                                    result
+                                                )
+                                                break
+                                    
+                                    # Render HTML partial for this result
+                                    html_content = templates.get_template("partials/thread_result.html").render(res=result)
+                                    payload = {
+                                        "id": result['id'],
+                                        "file": result.get('file', 'General Comment'),
+                                        "status": result['status'],
+                                        "html": html_content
+                                    }
+                                    queue.put_nowait({"type": "result", "payload": payload})
+                                    on_progress(f"✅ Analysis complete for {result.get('file', 'comment')}")
+                    else:
+                        # All results were cached, just render them
+                        for result in cached_results:
+                            html_content = templates.get_template("partials/thread_result.html").render(res=result)
+                            payload = {
+                                "id": result['id'],
+                                "file": result.get('file', 'General Comment'),
+                                "status": result['status'],
+                                "html": html_content
+                            }
+                            queue.put_nowait({"type": "result", "payload": payload})
+                    
+                    # 5. Generate Summary if we have results
+                    if results_list:
+                        # Check cache for summary
+                        cached_summary = None
+                        if head_commit_sha:
+                            cached_summary = cache.get_analysis_summary(
+                                job_data['owner'],
+                                job_data['repo'],
+                                job_data['pr_number'],
+                                head_commit_sha
+                            )
                         
-                        on_progress("🚀 Launching AI Agents...")
-                        
-                        # 4. Run Analysis in Parallel
-                        tasks = [
-                            reviewer.analyze_thread(item, sandbox_dir, job_data.get('custom_prompt'), retriever=vector_store) 
-                            for item in items_to_analyze
-                        ]
-                        
-                        results_list = []
-                        for future in asyncio.as_completed(tasks):
-                            result = await future
-                            if result:
-                                results_list.append(result)
-                                # Render HTML partial for this result
-                                html_content = templates.get_template("partials/thread_result.html").render(res=result)
-                                payload = {
-                                    "id": result['id'],
-                                    "file": result.get('file', 'General Comment'),
-                                    "status": result['status'],
-                                    "html": html_content
-                                }
-                                queue.put_nowait({"type": "result", "payload": payload})
-                                on_progress(f"✅ Analysis complete for {result.get('file', 'comment')}")
-                        
-                        # 5. Generate Summary if we have results
-                        if results_list:
+                        if cached_summary:
+                            on_progress("✅ Loaded cached summary")
+                            summary = cached_summary
+                        else:
                             on_progress("📊 Generating final resolution summary...")
                             summary = await reviewer.summarize_analyses(
                                 results_list, 
@@ -785,21 +1132,32 @@ async def stream_analysis_job(
                                 job_data['pr_number'],
                                 head_ref
                             )
-                            if summary:
-                                # Add stats
-                                summary['resolved_count'] = sum(1 for r in results_list if r['status'] in ['RESOLVED', 'APPROVED'])
-                                summary['unresolved_count'] = sum(1 for r in results_list if r['status'] not in ['RESOLVED', 'APPROVED', 'ACTIVE'])
-                                summary['total_threads'] = len(results_list)
+                            
+                            # Store summary in cache
+                            if summary and head_commit_sha:
+                                cache.store_analysis_summary(
+                                    job_data['owner'],
+                                    job_data['repo'],
+                                    job_data['pr_number'],
+                                    head_commit_sha,
+                                    summary
+                                )
+                        
+                        if summary:
+                            # Add stats
+                            summary['resolved_count'] = sum(1 for r in results_list if r['status'] in ['RESOLVED', 'APPROVED'])
+                            summary['unresolved_count'] = sum(1 for r in results_list if r['status'] not in ['RESOLVED', 'APPROVED', 'ACTIVE'])
+                            summary['total_threads'] = len(results_list)
 
-                                html_content = templates.get_template("partials/analysis_summary.html").render(res=summary)
-                                payload = {
-                                    "id": summary['id'],
-                                    "file": summary['file'],
-                                    "status": summary['status'],
-                                    "html": html_content
-                                }
-                                queue.put_nowait({"type": "result", "payload": payload})
-                                on_progress("✅ Resolution Summary Generated")
+                            html_content = templates.get_template("partials/analysis_summary.html").render(res=summary)
+                            payload = {
+                                "id": summary['id'],
+                                "file": summary['file'],
+                                "status": summary['status'],
+                                "html": html_content
+                            }
+                            queue.put_nowait({"type": "result", "payload": payload})
+                            on_progress("✅ Resolution Summary Generated")
                 
                 queue.put_nowait({"type": "done"})
                 
@@ -823,6 +1181,27 @@ async def stream_analysis_job(
         analysis_jobs.pop(job_id, None)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/analyze", response_class=HTMLResponse)
+async def view_analysis_dashboard(
+    request: Request,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    review_type: str = "general"
+):
+    """GET endpoint to view analysis dashboard, auto-loads cached reviews if available"""
+    import uuid
+    job_id = str(uuid.uuid4()) if review_type == "general" else None
+    
+    # Render the dashboard shell - it will auto-load cached reviews
+    return templates.TemplateResponse("analysis_dashboard.html", {
+        "request": request,
+        "job_id": job_id or "",
+        "owner": owner,
+        "repo": repo,
+        "pr_number": pr_number
+    })
 
 @app.post("/analyze", response_class=HTMLResponse)
 async def analyze_threads(
@@ -857,6 +1236,155 @@ async def analyze_threads(
         "repo": repo,
         "pr_number": pr_number
     })
+
+@app.get("/api/prs/{owner}/{repo}/{pr_number}/cache-status")
+async def get_cache_status(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher)
+):
+    """Check if cached review is outdated by comparing commit SHAs"""
+    try:
+        cache = get_cache()
+        
+        # Get current PR commit SHA
+        pr_data = fetcher.get_pr_threads(owner, repo, pr_number)
+        if not pr_data:
+            return {"error": "Could not fetch PR data"}
+        
+        current_commit_sha = pr_data.get("headRefOid", "")
+        if not current_commit_sha:
+            return {"error": "Could not get current commit SHA"}
+        
+        logger.debug(f"🔍 get_cache_status: Checking cache for {owner}/{repo}#{pr_number}@{current_commit_sha[:8]}")
+        
+        # Check cache for current commit first
+        cached_review = cache.get_general_review(owner, repo, pr_number, current_commit_sha)
+        has_cache_for_current = cached_review is not None
+        
+        logger.debug(f"🔍 get_cache_status: Cache check for current commit: {has_cache_for_current}")
+        
+        # Get latest cached commit
+        latest_cached = cache.get_latest_cached_commit(owner, repo, pr_number)
+        
+        logger.debug(f"🔍 get_cache_status: Latest cached commit: {latest_cached.get('commit_sha', 'None')[:8] if latest_cached else 'None'}")
+        
+        if not latest_cached and not has_cache_for_current:
+            logger.debug(f"🔍 get_cache_status: No cache found for {owner}/{repo}#{pr_number}")
+            return {
+                "has_cache": False,
+                "is_outdated": False,
+                "current_commit_sha": current_commit_sha,
+                "cached_commit_sha": None,
+                "cache_type": "MongoDB" if cache._use_mongo else "In-memory"
+            }
+        
+        cached_commit_sha = latest_cached.get("commit_sha", "") if latest_cached else current_commit_sha
+        is_outdated = cached_commit_sha != current_commit_sha if latest_cached else False
+        
+        logger.info(f"✅ get_cache_status: {owner}/{repo}#{pr_number} - has_cache={True}, is_outdated={is_outdated}, current={current_commit_sha[:8]}, cached={cached_commit_sha[:8] if cached_commit_sha else 'None'}")
+        
+        return {
+            "has_cache": True,
+            "is_outdated": is_outdated,
+            "current_commit_sha": current_commit_sha,
+            "cached_commit_sha": cached_commit_sha,
+            "cached_at": latest_cached.get("created_at").isoformat() if latest_cached and latest_cached.get("created_at") else None,
+            "cache_type": "MongoDB" if cache._use_mongo else "In-memory"
+        }
+    except Exception as e:
+        import traceback
+        logger.error(f"Error checking cache status: {e}\n{traceback.format_exc()}")
+        return {"error": str(e)}
+
+@app.get("/api/prs/{owner}/{repo}/{pr_number}/cached-review")
+async def get_cached_review(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher)
+):
+    """Get cached general review if available"""
+    try:
+        cache = get_cache()
+        
+        # Get current PR commit SHA
+        pr_data = fetcher.get_pr_threads(owner, repo, pr_number)
+        if not pr_data:
+            raise HTTPException(status_code=404, detail="Could not fetch PR data")
+        
+        current_commit_sha = pr_data.get("headRefOid", "")
+        if not current_commit_sha:
+            raise HTTPException(status_code=400, detail="Could not get current commit SHA")
+        
+        # Get cached review
+        cached_review = cache.get_general_review(owner, repo, pr_number, current_commit_sha)
+        
+        if not cached_review:
+            # Try to get latest cached commit to see what we have
+            latest_cached = cache.get_latest_cached_commit(owner, repo, pr_number)
+            if latest_cached:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"No cached review found for commit {current_commit_sha[:8]}. Latest cached commit: {latest_cached.get('commit_sha', 'unknown')[:8]}"
+                )
+            raise HTTPException(status_code=404, detail="No cached review found")
+        
+        head_ref = pr_data.get("headRefName", "main")
+        
+        # Render HTML
+        html_content = templates.get_template("partials/general_result.html").render(
+            res=cached_review,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            head_ref=head_ref,
+            head_commit_sha=current_commit_sha
+        )
+        
+        return {
+            "review": cached_review,
+            "html": html_content
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        logger.error(f"Error getting cached review: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/prs/{owner}/{repo}/{pr_number}/regenerate")
+async def force_regenerate(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    request: Request,
+    fetcher: GitHubFetcher = Depends(get_github_fetcher)
+):
+    """Force re-generation by clearing cache for current commit"""
+    try:
+        cache = get_cache()
+        
+        # Get current PR commit SHA
+        pr_data = fetcher.get_pr_threads(owner, repo, pr_number)
+        if not pr_data:
+            raise HTTPException(status_code=404, detail="Could not fetch PR data")
+        
+        current_commit_sha = pr_data.get("headRefOid", "")
+        if not current_commit_sha:
+            raise HTTPException(status_code=400, detail="Could not get current commit SHA")
+        
+        # Clear cache for current commit
+        cache.clear_commit_cache(owner, repo, pr_number, current_commit_sha)
+        
+        return {
+            "success": True,
+            "message": "Cache cleared. Please re-run the analysis.",
+            "commit_sha": current_commit_sha
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyze/followup")
 async def handle_followup_question(

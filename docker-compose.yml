@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  mongodb-atlas-local:
+    image: mongodb/mongodb-atlas-local:latest
+    container_name: ai-code-review-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGODB_ATLAS_LOCAL_MODE=serverless
+    volumes:
+      - mongodb-data:/data
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-code-review-app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=mongodb://mongodb-atlas-local:27017
+    volumes:
+      - .:/app
+    depends_on:
+      mongodb-atlas-local:
+        condition: service_healthy
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  mongodb-data:
+    driver: local
+

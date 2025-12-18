@@ -24,7 +24,167 @@ def get_user_sync(collection, user_id):
     return collection.find_one({"user_id": user_id})
 ````
 
-## 2\. Robust Index Management (Atlas Search & Vector)
+## 2\. Handling MongoDB ObjectId in Pydantic
+
+**Context:** MongoDB uses `ObjectId` as the primary key type (`_id`), but Pydantic doesn't know how to validate or serialize BSON `ObjectId` objects by default. This causes serialization errors when storing Pydantic models in MongoDB or returning them via APIs.
+
+### A. Pydantic v2 Solution (Recommended)
+
+**Rule:** Use `Annotated` types with `BeforeValidator` and `PlainSerializer` to create a reusable `PyObjectId` type that handles both validation and serialization.
+
+**Key Requirements:**
+1. **Validation:** Accept strings (from API requests) and convert them to `ObjectId`, or accept existing `ObjectId`s.
+2. **Serialization:** Convert `ObjectId` back to a string when generating JSON (so your API doesn't crash).
+3. **Field Mapping:** Use `alias="_id"` to map MongoDB's `_id` to Python's `id` field.
+4. **Model Configuration:** Enable `arbitrary_types_allowed` and `populate_by_name` for proper ObjectId handling.
+
+```python
+from typing import Any, Annotated
+from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, ConfigDict
+from bson import ObjectId
+
+# 1. Define the Custom Type
+# -------------------------
+# - BeforeValidator: Runs before Pydantic sees the value. Converts strings to ObjectId.
+# - PlainSerializer: Runs when you call .model_dump_json(). Converts ObjectId to str.
+PyObjectId = Annotated[
+    ObjectId,
+    BeforeValidator(lambda x: ObjectId(x) if isinstance(x, str) else x),
+    PlainSerializer(lambda x: str(x), return_type=str),
+]
+
+# 2. Define the Model
+# -------------------
+class UserModel(BaseModel):
+    # The 'id' field maps to '_id' in MongoDB but 'id' in your Python object
+    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
+    name: str
+    email: str
+
+    # Allow ObjectId types in the model (Pydantic strictly forbids unknown types by default)
+    model_config = ConfigDict(
+        populate_by_name=True,  # Allows using 'id' OR '_id' when instantiating
+        arbitrary_types_allowed=True,  # Allows ObjectId type
+    )
+
+# 3. Usage Examples
+# -----------------
+
+# A. Creating from Python (e.g., inserting into DB)
+user = UserModel(name="Alice", email="alice@example.com")
+print(f"Generated ID: {user.id}")  # type: ObjectId
+print(f"Dump for DB: {user.model_dump(by_alias=True)}") 
+# Output: {'_id': ObjectId('...'), 'name': 'Alice', 'email': 'alice@example.com'}
+
+# B. Parsing from MongoDB (e.g., reading from DB)
+mongo_doc = {"_id": ObjectId("65df7b1d9f8c4b2a3c8e4d1f"), "name": "Bob", "email": "bob@example.com"}
+user_from_db = UserModel(**mongo_doc)
+print(f"Loaded User: {user_from_db.id}")  # It preserves the ObjectId type
+
+# C. Sending to Client (JSON Serialization)
+print(user_from_db.model_dump_json())
+# Output: {"id":"65df7b1d9f8c4b2a3c8e4d1f", "name":"Bob", "email":"bob@example.com"}
+```
+
+### B. Key Configuration Concepts
+
+| Feature | Why you need it |
+| --- | --- |
+| **`alias="_id"`** | MongoDB mandates the primary key be named `_id`. Python conventions (and frontends) prefer `id`. This maps them automatically. |
+| **`populate_by_name=True`** | Allows you to instantiate the model using `id` (easier for you) OR `_id` (coming from the DB). |
+| **`arbitrary_types_allowed`** | By default, Pydantic throws an error if it sees a type it doesn't know (like `ObjectId`). This flag tells it to relax. |
+| **`PlainSerializer`** | Crucial for APIs. `ObjectId` is not valid JSON. This converts it to a string only when creating JSON responses. |
+
+### C. Pydantic v1 Solution (Legacy)
+
+**Rule:** For Pydantic v1 codebases, use a custom `PyObjectId` class with `__get_validators__` and configure `json_encoders` in the model's `Config` class.
+
+```python
+# Pydantic v1 ONLY
+from pydantic import BaseModel, Field
+from bson import ObjectId
+
+class PyObjectId(ObjectId):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, v):
+        if not ObjectId.is_valid(v):
+            raise ValueError("Invalid objectid")
+        return ObjectId(v)
+
+class UserModel(BaseModel):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}  # Critical for JSON serialization
+```
+
+### D. Serialization for MongoDB Storage
+
+**Rule:** When storing Pydantic models in MongoDB, always convert them to dictionaries using `.model_dump(by_alias=True)` to ensure `_id` mapping is correct.
+
+**Pattern:** Clean Pydantic models before MongoDB operations to avoid serialization errors.
+
+```python
+# ✅ Correct: Convert Pydantic model to dict before storing
+def store_user(collection, user: UserModel):
+    doc = user.model_dump(by_alias=True, exclude_none=True)
+    # doc now has '_id' instead of 'id', ready for MongoDB
+    collection.insert_one(doc)
+
+# ✅ Correct: Recursive cleaning for nested Pydantic models
+def _clean_for_serialization(self, obj):
+    """Recursively clean object for MongoDB serialization"""
+    if isinstance(obj, dict):
+        return {k: self._clean_for_serialization(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [self._clean_for_serialization(item) for item in obj]
+    elif isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif hasattr(obj, 'model_dump'):
+        # Pydantic v2 model - use model_dump()
+        return self._clean_for_serialization(obj.model_dump())
+    elif hasattr(obj, 'dict'):
+        # Pydantic v1 model - use dict()
+        return self._clean_for_serialization(obj.dict())
+    elif hasattr(obj, '__dict__'):
+        # Convert other objects to dict
+        return self._clean_for_serialization(obj.__dict__)
+    else:
+        # Convert to string as fallback
+        return str(obj)
+```
+
+### E. Recommendation: Consider an ODM
+
+**Rule:** If your application is heavy on MongoDB interactions, manually validating ObjectIDs can become repetitive. Consider using a Pydantic-based ODM (Object Document Mapper) that handles this automatically.
+
+**Recommended ODMs:**
+* **Beanie:** An asynchronous ODM built directly on top of Pydantic and Motor.
+* **ODMantic:** Another popular async ODM for Pydantic.
+
+**Beanie Example:**
+
+```python
+# With Beanie, you don't need custom validation logic
+from beanie import Document
+
+class User(Document):
+    name: str
+    email: str
+    
+# It automatically handles _id <-> id conversion and validation
+# Usage:
+user = User(name="Alice", email="alice@example.com")
+await user.insert()  # Automatically generates _id
+```
+
+## 3\. Robust Index Management (Atlas Search & Vector)
 
 **Context:** Unlike standard B-tree indexes, Atlas Search (Vector/Lucene) indexes are built asynchronously on the cloud side. The API command returns *immediately*, but the index is not ready for query execution until the build finishes.
 
@@ -147,7 +307,7 @@ async def ensure_index(collection, model):
     print(f"Index {model.name} is ready.")
 ```
 
-## 3\. Aggregation Pipeline Optimization
+## 4\. Aggregation Pipeline Optimization
 
 **Context:** The order of operations in MongoDB aggregation pipelines significantly impacts performance, especially with Vector Search.
 
@@ -177,7 +337,7 @@ async def ensure_index(collection, model):
 ]
 ```
 
-## 4\. General Implementation Guidelines
+## 5\. General Implementation Guidelines
 
 ### Error Handling
 
@@ -192,7 +352,7 @@ async def ensure_index(collection, model):
   * **Pattern:** Use a wrapper or repository pattern to inject standard filters (e.g., `tenant_id`, `experiment_id`) automatically.
   * **Rule:** If using a wrapper, ensure it exposes the underlying driver objects (e.g., `database` or `collection`) for advanced operations like index management that should not be scoped.
 
-## 5\. Anti-Patterns to Avoid
+## 6\. Anti-Patterns to Avoid
 
 1.  **Fire-and-Forget Indexing:** Calling `create_search_index` and immediately running a query.
 2.  **Assuming "READY" = Queryable:** In rare cases (updates/swaps), an index may report `READY` while the old version is still active. Always check `queryable: true`.

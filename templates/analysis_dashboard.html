@@ -10,10 +10,15 @@
     repo_stats: null,
     showModal: true,
     
-    init() {
-        const evtSource = new EventSource(`/analyze/job/${this.jobId}/stream`);
+    async init() {
+        // Try to load cached general review first
+        const cachedLoaded = await this.loadCachedReview();
         
-        evtSource.onmessage = (event) => {
+        // Only start the job stream if we didn't load from cache and have a job_id
+        if (!cachedLoaded && this.jobId) {
+            const evtSource = new EventSource(`/analyze/job/${this.jobId}/stream`);
+            
+            evtSource.onmessage = (event) => {
             const data = JSON.parse(event.data);
             
             if (data.type === 'progress') {
@@ -58,14 +63,15 @@
             }
         };
         
-        evtSource.onerror = () => {
-            if (this.status !== 'complete') {
-                this.status = 'error';
-                this.progress = 'Connection lost.';
-                this.log('Stream connection interrupted.', 'error');
-            }
-            evtSource.close();
-        };
+            evtSource.onerror = () => {
+                if (this.status !== 'complete') {
+                    this.status = 'error';
+                    this.progress = 'Connection lost.';
+                    this.log('Stream connection interrupted.', 'error');
+                }
+                evtSource.close();
+            };
+        }
     },
     
     getStatusClass(status) {
@@ -112,6 +118,61 @@
         
         logContainer.appendChild(div);
         logContainer.scrollTop = logContainer.scrollHeight;
+    },
+    
+    async loadCachedReview() {
+        try {
+            this.log('🔍 Checking for cached review...', 'info');
+            const response = await fetch(`/api/prs/{{ owner }}/{{ repo }}/{{ pr_number }}/cache-status`);
+            const cacheStatus = await response.json();
+            
+            if (cacheStatus.error) {
+                this.log(`⚠️ Cache check error: ${cacheStatus.error}`, 'warning');
+                return false;
+            }
+            
+            this.log(`Cache status: has_cache=${cacheStatus.has_cache}, is_outdated=${cacheStatus.is_outdated}`, 'debug');
+            
+            if (cacheStatus.has_cache && !cacheStatus.is_outdated) {
+                this.log('✅ Found valid cached review, loading...', 'success');
+                // Load the cached review
+                const reviewResponse = await fetch(`/api/prs/{{ owner }}/{{ repo }}/{{ pr_number }}/cached-review`);
+                if (reviewResponse.ok) {
+                    const reviewData = await reviewResponse.json();
+                    if (reviewData.review) {
+                        // Add cached review to results
+                        this.results.push({
+                            id: reviewData.review.id || 'cached-general-review',
+                            file: reviewData.review.file || 'General Review',
+                            status: reviewData.review.status || 'COMPLETED',
+                            html: reviewData.html
+                        });
+                        
+                        // Auto-select the cached review
+                        this.activeTab = this.results[0].id;
+                        this.status = 'complete';
+                        this.progress = 'Loaded from cache';
+                        this.showModal = false;
+                        
+                        this.log('✅ Loaded cached general review', 'success');
+                        return true;
+                    } else {
+                        this.log('⚠️ Cached review data is empty', 'warning');
+                    }
+                } else {
+                    const errorText = await reviewResponse.text();
+                    this.log(`⚠️ Failed to load cached review: ${reviewResponse.status} - ${errorText}`, 'warning');
+                }
+            } else if (cacheStatus.has_cache && cacheStatus.is_outdated) {
+                this.log('⚠️ Cached review is outdated (PR has new commits)', 'warning');
+            } else {
+                this.log('ℹ️ No cached review found', 'info');
+            }
+        } catch (error) {
+            console.error('Error loading cached review:', error);
+            this.log(`❌ Error loading cached review: ${error.message}`, 'error');
+        }
+        return false;
     }
 }">
     
@@ -211,7 +272,65 @@
             </div>
         </div>
         
-        <div class="flex gap-3">
+        <div class="flex gap-3 items-center">
+            <!-- Cache Status & Re-generate Button -->
+            <div x-data="{ 
+                isOutdated: false, 
+                hasCache: false,
+                isLoading: false,
+                checkStatus() {
+                    fetch(`/api/prs/{{ owner }}/{{ repo }}/{{ pr_number }}/cache-status`)
+                        .then(r => r.json())
+                        .then(data => {
+                            this.isOutdated = data.is_outdated || false;
+                            this.hasCache = data.has_cache || false;
+                        })
+                        .catch(() => {});
+                },
+                async regenerate() {
+                    if (!confirm('This will clear the cache and force a fresh analysis. Continue?')) return;
+                    this.isLoading = true;
+                    try {
+                        const response = await fetch(`/api/prs/{{ owner }}/{{ repo }}/{{ pr_number }}/regenerate`, {
+                            method: 'POST'
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            alert('Cache cleared! Refreshing page to start new analysis...');
+                            window.location.reload();
+                        }
+                    } catch (error) {
+                        alert('Error: ' + error.message);
+                    } finally {
+                        this.isLoading = false;
+                    }
+                },
+                init() {
+                    this.checkStatus();
+                    // Re-check every 30 seconds
+                    setInterval(() => this.checkStatus(), 30000);
+                }
+            }">
+                <template x-if="isOutdated && hasCache">
+                    <div class="flex items-center gap-2">
+                        <span class="inline-flex items-center px-2.5 py-1 rounded text-xs font-bold uppercase tracking-wide bg-yellow-900/20 text-yellow-400 border border-yellow-800/50">
+                            ⚠️ Outdated
+                        </span>
+                        <button @click="regenerate()" 
+                                :disabled="isLoading"
+                                class="text-xs text-yellow-400 hover:text-yellow-300 border border-yellow-800/50 rounded px-3 py-1 hover:border-yellow-700 hover:bg-yellow-900/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1">
+                            <template x-if="!isLoading">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                                Re-generate
+                            </template>
+                            <template x-if="isLoading">
+                                <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                            </template>
+                        </button>
+                    </div>
+                </template>
+            </div>
+            
             <button @click="showModal = true" class="text-xs text-gray-400 hover:text-white border border-gray-700 rounded px-3 py-1 hover:border-gray-500 transition-colors">
                 Show Logs
             </button>
